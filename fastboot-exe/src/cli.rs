@@ -10,8 +10,31 @@ pub struct Cli {
     #[arg(short = 's', long, global = true)]
     pub serial: Option<String>,
 
+    /// 目标槽位：a / b / other / all（对齐官方 `--slot`）。flash/flashall/update/wipe-super/update-super 生效。
     #[arg(long, global = true)]
     pub slot: Option<String>,
+
+    /// 刷 vbmeta 时置 HASHTREE_DISABLED 位（关闭 dm-verity）。
+    #[arg(long = "disable-verity", global = true)]
+    pub disable_verity: bool,
+
+    /// 刷 vbmeta 时置 VERIFICATION_DISABLED 位（关闭 AVB 校验）。
+    #[arg(long = "disable-verification", global = true)]
+    pub disable_verification: bool,
+
+    /// flashall / update 完成后不重启（官方默认会重启）。
+    #[arg(long = "skip-reboot", global = true)]
+    pub skip_reboot: bool,
+
+    /// 命令成功后切换活动槽：`--set-active` 用 `--slot`（缺省当前槽），`--set-active=b` 指定槽位。
+    #[arg(
+        long = "set-active",
+        global = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub set_active: Option<String>,
 
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -25,7 +48,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    Devices,
+    Devices {
+        /// 附带 USB VID:PID / 产品名等信息。
+        #[arg(short = 'l', long)]
+        long: bool,
+    },
 
     Getvar {
         variable: String,
@@ -48,20 +75,6 @@ pub enum Commands {
         target: String,
     },
 
-    // 连字符形式的 reboot 便捷命令：标准 fastboot 与多数 GUI/脚本都直接调
-    // `fastboot reboot-bootloader` 等单命令，缺失会报 unrecognized subcommand。
-    #[command(name = "reboot-bootloader")]
-    RebootBootloader,
-
-    #[command(name = "reboot-fastboot")]
-    RebootFastboot,
-
-    #[command(name = "reboot-recovery")]
-    RebootRecovery,
-
-    #[command(name = "reboot-edl")]
-    RebootEdl,
-
     Flashall {
         #[arg(short, long)]
         wipe: bool,
@@ -69,6 +82,9 @@ pub enum Commands {
 
     Update {
         filename: PathBuf,
+        /// 同时擦除 userdata + metadata。
+        #[arg(short, long)]
+        wipe: bool,
     },
 
     Diagnose,
@@ -97,6 +113,14 @@ pub enum Commands {
     #[command(visible_alias = "i")]
     Install {
         apk: PathBuf,
+        #[arg(short, long)]
+        replace: bool,
+    },
+
+    #[command(name = "install-multiple", visible_alias = "install-multi")]
+    InstallMultiple {
+        #[arg(required = true, num_args = 1..)]
+        apks: Vec<PathBuf>,
         #[arg(short, long)]
         replace: bool,
     },
@@ -140,6 +164,13 @@ pub enum Commands {
         command: Vec<String>,
     },
 
+    /// 原样透传：把 raw 之后的整串作为 fastboot 命令直接发给设备（不加 "oem " 前缀、不做任何包装）。
+    /// 用于厂商私有指令（如 VIVO BBK 只认字符串命令）：`fastboot raw <厂商指令>` → 设备收到 `<厂商指令>`。
+    Raw {
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
     Flashing {
         operation: String,
     },
@@ -157,6 +188,7 @@ pub enum Commands {
         ramdisk: Option<PathBuf>,
     },
 
+    /// `fetch <partition>[:offset[:size]] <outfile>`：回读分区（fastbootd）。
     Fetch {
         partition: String,
         output: PathBuf,
@@ -197,6 +229,15 @@ pub enum Commands {
         super_empty: Option<PathBuf>,
     },
 
+    #[command(name = "update-super")]
+    UpdateSuper {
+        /// super 元数据镜像（lpmake 生成，如 super_empty.img）。
+        image: PathBuf,
+        /// 附加 `wipe`：先清空所有现存逻辑分区再合并。
+        #[arg(long)]
+        wipe: bool,
+    },
+
     Stage {
         input: PathBuf,
     },
@@ -205,6 +246,12 @@ pub enum Commands {
     GetStaged {
         output: PathBuf,
     },
+
+    /// `fastboot continue`：结束 fastboot、继续正常启动。
+    Continue,
+
+    /// 擦除 userdata + metadata（等价官方 `fastboot -w`）。
+    Wipe,
 
     #[command(name = "截图")]
     Jietu,

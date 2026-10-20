@@ -1,0 +1,5 @@
+fastboot-exe/**/*.rs text eol=lf
+fastboot-exe/*.toml text eol=lf
+.github/workflows/*.yml text eol=lf
+*.md text eol=lf
+Cargo.lock text eol=lf

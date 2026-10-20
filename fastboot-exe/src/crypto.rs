@@ -1,7 +1,7 @@
 use base64::Engine;
 use byteorder::{LittleEndian, WriteBytesExt};
 use num_bigint::BigUint;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
@@ -125,9 +125,8 @@ fn generate_private_key_in_memory() -> RsaPrivateKey {
     }
 }
 
-/// 判断磁盘上的 adbkey.pub 是否与给定私钥同属一把钥匙（按 RSA 模数 n 比对，
-/// 不受公钥文本编码/注释差异影响）。这样既能修复「公私钥不配对导致永远弹授权」，
-/// 又不会误改与设备已配对的官方公钥。
+/// 判断 adbkey.pub 与给定私钥是否同属一把钥匙（按 RSA 模数 n 比对，不受文本编码差异影响）：
+/// 既能修复「公私钥不配对导致永远弹授权」，又不误改与设备已配对的官方公钥。
 fn pub_matches_key(pub_path: &Path, key: &RsaPrivateKey) -> bool {
     let content = match fs::read_to_string(pub_path) {
         Ok(c) => c,
@@ -181,13 +180,8 @@ fn persist_keypair(priv_path: &Path, pub_path: &Path, key: &RsaPrivateKey) {
     }
 }
 
-/// 加载或（在确实缺失/损坏时）生成 adb 私钥。
-///
-/// 持久化策略（修复原作者未完成处）：
-/// 1. 已存在且可解析 → 直接复用（同时校正 adbkey.pub），**不重新生成**；
-/// 2. 文件可读但格式不识别（PKCS#8/#1 均失败）→ 先备份原文件再重建，绝不静默丢弃；
-/// 3. 文件存在却暂时读不出（被占用等）→ 本次使用临时内存密钥，**绝不改动磁盘原密钥**；
-/// 4. 真正缺失 → 生成并原子落盘。
+/// 加载或（缺失/损坏时）生成 adb 私钥。策略：可解析则直接复用（并校正 adbkey.pub）；格式不识别
+/// 则先备份再重建，绝不静默丢弃；暂时读不出则本次用临时内存密钥、不动磁盘；真正缺失才生成落盘。
 pub fn load_or_generate_private_key() -> RsaPrivateKey {
     let dir = android_dir();
     let priv_path = dir.join("adbkey");
@@ -221,6 +215,20 @@ pub fn load_or_generate_private_key() -> RsaPrivateKey {
     priv_key
 }
 
+/// `adb keygen <file>`：生成新密钥对写到 `<file>`（PKCS#8 私钥）与 `<file>.pub`（Android 公钥），
+/// 与官方一致。已存在的文件会被覆盖（官方同样如此），不触碰 `~/.android/adbkey`。
+pub fn keygen(path: &Path) -> Result<(), String> {
+    let key = generate_private_key_in_memory();
+    let pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| format!("私钥格式化失败: {e}"))?;
+    write_atomic(path, pem.as_bytes()).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    let pub_path = PathBuf::from(format!("{}.pub", path.display()));
+    let pub_str = generate_adb_public_key(&key);
+    write_atomic(&pub_path, pub_str.trim_end_matches('\0').as_bytes())
+        .map_err(|e| format!("写入 {} 失败: {e}", pub_path.display()))
+}
+
 pub fn sign_token(priv_pem: &str, token: &[u8]) -> Result<Vec<u8>, &'static str> {
     let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_pem)
         .or_else(|_| RsaPrivateKey::from_pkcs1_pem(priv_pem))
@@ -232,26 +240,12 @@ pub fn sign_token(priv_pem: &str, token: &[u8]) -> Result<Vec<u8>, &'static str>
     ]);
     digest_info.extend_from_slice(token);
 
-    let padding = rsa::pkcs1v15::Pkcs1v15Sign::new_raw();
+    let padding = rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed();
     let signature = priv_key
         .sign(padding, &digest_info)
         .map_err(|_| "裸签计算失败")?;
 
     Ok(signature)
-}
-
-pub fn get_public_key() -> Vec<u8> {
-    let priv_key = load_or_generate_private_key();
-    let pub_path = android_dir().join("adbkey.pub");
-    match fs::read(&pub_path) {
-        Ok(mut data) => {
-            if !data.ends_with(&[0]) {
-                data.push(0);
-            }
-            data
-        }
-        Err(_) => generate_adb_public_key(&priv_key).into_bytes(),
-    }
 }
 
 pub fn get_or_create_keys() -> Result<(String, Vec<u8>), &'static str> {

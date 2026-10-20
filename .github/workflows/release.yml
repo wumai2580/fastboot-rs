@@ -3,13 +3,23 @@ on:
   push:
     tags:
       - 'v*'
+permissions:
+  contents: write
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+      - run: cargo build --locked --release -p fastboot --lib --bin fastboot
+      - name: Prepare command names
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath target/release/fastboot.exe -Destination target/release/adb.exe
+          Copy-Item -LiteralPath target/release/fastboot.exe -Destination target/release/rmf-cli.exe
       - uses: softprops/action-gh-release@v1
         with:
-          files: target/release/rust
+          files: |
+            target/release/fastboot.exe
+            target/release/adb.exe
+            target/release/rmf-cli.exe

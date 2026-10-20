@@ -3,13 +3,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::error::TransportError;
-use crate::transport::{AsyncTransport, TransportStats};
-const FASTBOOT_CLASS: u8 = 0xFF;
-const FASTBOOT_SUBCLASS: u8 = 0x42;
-const FASTBOOT_PROTOCOL: u8 = 0x03;
-const ADB_PROTOCOL: u8 = 0x01;
-const USB2_MAX_PACKET_SIZE: usize = 512;
-const USB3_MAX_PACKET_SIZE: usize = 1024;
+use crate::transport::AsyncTransport;
+use crate::usb_iface::{
+    IF_CLASS_VENDOR, IF_PROTOCOL_ADB, IF_PROTOCOL_FASTBOOT, IF_SUBCLASS_ANDROID,
+};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsbMode {
@@ -28,15 +25,57 @@ pub struct UsbDeviceInfo {
     pub manufacturer: Option<String>,
 }
 
-#[cfg(target_os = "windows")]
 pub use self::windows_impl::*;
 
-#[cfg(target_os = "windows")]
+/// 仅从硬件 ID 段提取接口字段；后面的设备实例 ID、序列号和接口 GUID 不进入诊断。
+fn format_usb_diagnostic_context(
+    backend: &str,
+    device_path: &str,
+    read_pipe: Option<u8>,
+    write_pipe: Option<u8>,
+) -> String {
+    let hardware_id = device_path.split(['#', '\\']).find(|part| {
+        part.get(..4)
+            .is_some_and(|s| s.eq_ignore_ascii_case("VID_"))
+    });
+    let field = |prefix: &str, width: usize| {
+        hardware_id.and_then(|id| {
+            id.split('&').find_map(|part| {
+                let name = part.get(..prefix.len())?;
+                if !name.eq_ignore_ascii_case(prefix) {
+                    return None;
+                }
+                let value = part.get(prefix.len()..)?;
+                if value.len() != width || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                u16::from_str_radix(value, 16).ok()
+            })
+        })
+    };
+    let format_field = |value: Option<u16>, width: usize| {
+        value
+            .map(|v| format!("0x{v:0width$x}"))
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let format_pipe = |pipe: Option<u8>| {
+        pipe.map(|p| format!("0x{p:02x}"))
+            .unwrap_or_else(|| "n/a".to_string())
+    };
+    format!(
+        "backend={backend} vid={} pid={} mi={} read_pipe={} write_pipe={}",
+        format_field(field("VID_", 4), 4),
+        format_field(field("PID_", 4), 4),
+        format_field(field("MI_", 2), 2),
+        format_pipe(read_pipe),
+        format_pipe(write_pipe),
+    )
+}
+
 mod windows_impl {
     use super::*;
     use std::ffi::OsStr;
     use std::ffi::OsString;
-    use std::io::Write;
     use std::mem;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
@@ -64,20 +103,8 @@ mod windows_impl {
     }
 
     const METHOD_BUFFERED: DWORD = 0;
-    const METHOD_OUT_DIRECT: DWORD = 2;
     const FILE_READ_ACCESS: DWORD = 1;
-    const FILE_WRITE_ACCESS: DWORD = 2;
     const ADB_CTL_GET_USB_DEVICE_DESCRIPTOR: DWORD = 10;
-    #[allow(dead_code)]
-    const ADB_CTL_GET_USB_CONFIGURATION_DESCRIPTOR: DWORD = 11;
-    #[allow(dead_code)]
-    const ADB_CTL_GET_USB_INTERFACE_DESCRIPTOR: DWORD = 12;
-    #[allow(dead_code)]
-    const ADB_CTL_GET_ENDPOINT_INFORMATION: DWORD = 13;
-    #[allow(dead_code)]
-    const ADB_CTL_BULK_READ: DWORD = 14;
-    #[allow(dead_code)]
-    const ADB_CTL_BULK_WRITE: DWORD = 15;
     const ADB_CTL_GET_SERIAL_NUMBER: DWORD = 16;
 
     const ADB_IOCTL_GET_USB_DEVICE_DESCRIPTOR: DWORD = ctl_code(
@@ -92,20 +119,6 @@ mod windows_impl {
         METHOD_BUFFERED,
         FILE_READ_ACCESS,
     );
-    #[allow(dead_code)]
-    const ADB_IOCTL_BULK_READ: DWORD = ctl_code(
-        FILE_DEVICE_UNKNOWN,
-        ADB_CTL_BULK_READ,
-        METHOD_OUT_DIRECT,
-        FILE_READ_ACCESS,
-    );
-    #[allow(dead_code)]
-    const ADB_IOCTL_BULK_WRITE: DWORD = ctl_code(
-        FILE_DEVICE_UNKNOWN,
-        ADB_CTL_BULK_WRITE,
-        METHOD_BUFFERED,
-        FILE_WRITE_ACCESS,
-    );
 
     use winapi::shared::winusbio::WINUSB_PIPE_INFORMATION;
     use winapi::um::winusb::{
@@ -114,14 +127,8 @@ mod windows_impl {
         WinUsb_ResetPipe, WinUsb_SetPipePolicy, WinUsb_WritePipe, USB_INTERFACE_DESCRIPTOR,
         WINUSB_INTERFACE_HANDLE,
     };
-    #[allow(dead_code)]
-    const USB_ENDPOINT_DIRECTION_MASK: u8 = 0x80;
     const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
-    #[allow(dead_code)]
-    const USB_ENDPOINT_DIRECTION_OUT: u8 = 0x00;
     use winapi::shared::winusbio::PIPE_TRANSFER_TIMEOUT;
-    #[allow(dead_code)]
-    use winapi::shared::winusbio::RAW_IO;
 
     #[repr(C, packed)]
     #[derive(Debug, Clone, Copy, Default)]
@@ -141,24 +148,15 @@ mod windows_impl {
         i_serial_number: u8,
         b_num_configurations: u8,
     }
-    #[repr(C)]
-    #[allow(dead_code)]
-    struct AdbBulkTransfer {
-        time_out: DWORD,
-        transfer_size: DWORD,
-        write_buffer: u64,
-    }
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum DriverType {
         Legacy,
         WinUsb,
-        Unknown,
     }
     #[derive(Debug, Clone, Copy)]
     struct WinUsbEndpoints {
         read_pipe: u8,
         write_pipe: u8,
-        max_packet_size: u16,
     }
 
     pub struct UsbTransport {
@@ -168,16 +166,8 @@ mod windows_impl {
         winusb_handle: WINUSB_INTERFACE_HANDLE,
         winusb_endpoints: Option<WinUsbEndpoints>,
         driver_type: DriverType,
-        #[allow(dead_code)]
-        serial_number: String,
-        #[allow(dead_code)]
         device_path: String,
-        #[allow(dead_code)]
-        max_packet_size: usize,
         timeout: Duration,
-        stats: TransportStats,
-        #[allow(dead_code)]
-        is_usb3: bool,
         write_event: HANDLE,
         read_event: HANDLE,
     }
@@ -241,7 +231,23 @@ mod windows_impl {
 
             Ok(devices)
         }
+        /// 判定接口属于 fastboot 还是 adb。顺序：兼容 ID 三元组 → 纯 fastboot PID 名单 → 打开设备读接口描述符。
+        /// 前两步不碰设备句柄——`fastboot devices` 每 1.5s 探测一轮，开句柄会与真实命令抢 WinUSB 句柄，
+        /// 还会让 Windows 反复报设备变更（不停的插拔提示音）。
+        /// 兼容 ID 是权威判据故排最前；PID 名单只认常见纯 fastboot PID，漏判才落到 open 兜底。
+        /// 返回 `None` = 既非 adb 也非 fastboot（如 WinUSB 驱动下的 EDL 9008/诊断口），从两侧列表排除；
+        /// AOSP 对描述符不匹配的接口就是直接跳过设备（is_adb_interface / fastboot recognized_device）。
         fn detect_device_mode(info: &UsbDeviceInfo) -> Option<UsbMode> {
+            match crate::usb_iface::probe(&info.device_path) {
+                Some(crate::usb_iface::AndroidIface::Fastboot) => return Some(UsbMode::Fastboot),
+                Some(crate::usb_iface::AndroidIface::Adb) => return Some(UsbMode::Adb),
+                // 三元组可读但既非 adb 也非 fastboot（EDL 9008/诊断口等）：确定性排除。
+                // 绝不能落进任何「兜底当 adb」路径——那正是 GUI 对 EDL 口发 adb reboot edl、
+                // 报「未找到 Bulk 端点」的根因。
+                Some(crate::usb_iface::AndroidIface::Other) => return None,
+                // 判不出来（拿不到兼容 ID）才继续往下兜底，不能就此认定某一种模式
+                None => {}
+            }
             if Self::is_fastboot_device(info) {
                 return Some(UsbMode::Fastboot);
             }
@@ -280,25 +286,31 @@ mod windows_impl {
 
                 WinUsb_Free(winusb_handle);
                 CloseHandle(device_handle);
-                if iface_desc.bInterfaceClass == FASTBOOT_CLASS
-                    && iface_desc.bInterfaceSubClass == FASTBOOT_SUBCLASS
-                    && iface_desc.bInterfaceProtocol == FASTBOOT_PROTOCOL
+                if iface_desc.bInterfaceClass == IF_CLASS_VENDOR
+                    && iface_desc.bInterfaceSubClass == IF_SUBCLASS_ANDROID
+                    && iface_desc.bInterfaceProtocol == IF_PROTOCOL_FASTBOOT
                 {
                     return Some(UsbMode::Fastboot);
                 }
-                if iface_desc.bInterfaceClass == FASTBOOT_CLASS
-                    && iface_desc.bInterfaceSubClass == FASTBOOT_SUBCLASS
-                    && iface_desc.bInterfaceProtocol == ADB_PROTOCOL
+                if iface_desc.bInterfaceClass == IF_CLASS_VENDOR
+                    && iface_desc.bInterfaceSubClass == IF_SUBCLASS_ANDROID
+                    && iface_desc.bInterfaceProtocol == IF_PROTOCOL_ADB
                 {
                     return Some(UsbMode::Adb);
                 }
-                Some(UsbMode::Adb)
+                // 描述符可读且三元组不属于 Android adb/fastboot（EDL 9008/诊断口等）：
+                // 确定性排除。旧代码这里兜底返回 Adb，正是「对 EDL 口发 adb 命令」的误判源头。
+                None
             }
         }
+        /// 「一看 PID 就知道只可能是 fastboot」的设备。这是兼容 ID 判不出时的回退，不是主判据：
+        /// 名单只覆盖常见纯 fastboot PID。另一用途：`open()` 后放宽协议号校验（部分 bootloader 不标准）。
+        /// 注意：高通 EDL/下载模式的 0x9008/0x9006 绝不能进名单——那是 Sahara/Firehose 口，
+        /// 不是 fastboot；对它发 fastboot 命令会搅乱 Sahara 状态机（EDL 设备由 edl_port 侧独立发现）。
         fn is_fastboot_device(info: &UsbDeviceInfo) -> bool {
             const PURE_FASTBOOT_PIDS: &[u16] = &[
-                0xd00d, 0x4ee0, 0x9008, 0x9006, 0x9025, 0x900e, 0xff40, 0x2281, 0x0fff, 0x6601,
-                0x1057, 0x0016, 0x9011, 0x201c, 0x0003,
+                0xd00d, 0x4ee0, 0x9025, 0x900e, 0xff40, 0x2281, 0x0fff, 0x6601, 0x1057, 0x0016,
+                0x9011, 0x201c, 0x0003,
             ];
             if PURE_FASTBOOT_PIDS.contains(&info.product_id) {
                 return true;
@@ -347,8 +359,7 @@ mod windows_impl {
                 .to_string();
             let (vid, pid) = Self::parse_vid_pid(&device_path)?;
 
-            let serial = Self::extract_serial_from_path(&device_path)
-                .or_else(|| Self::get_parent_serial_from_path(&device_path))
+            let serial = crate::usb_iface::serial_for_interface(&device_path)
                 .or_else(|| Self::get_serial_via_ioctl(&device_path))
                 .unwrap_or_else(|| format!("{:04x}:{:04x}", vid, pid));
 
@@ -362,7 +373,7 @@ mod windows_impl {
                 manufacturer: Some("Google, Inc".to_string()),
             })
         }
-        fn parse_vid_pid(path: &str) -> Option<(u16, u16)> {
+        pub(crate) fn parse_vid_pid(path: &str) -> Option<(u16, u16)> {
             let path_upper = path.to_uppercase();
             let vid_pos = path_upper.find("VID_")?;
             let pid_pos = path_upper.find("PID_")?;
@@ -374,21 +385,6 @@ mod windows_impl {
             let pid = u16::from_str_radix(pid_str, 16).ok()?;
 
             Some((vid, pid))
-        }
-        fn extract_serial_from_path(path: &str) -> Option<String> {
-            let parts: Vec<&str> = path.split('#').collect();
-            if parts.len() >= 3 {
-                let serial = parts[2];
-                if serial.starts_with('{') || serial.is_empty() || serial.len() >= 64 {
-                    return None;
-                }
-
-                if serial.contains('&') {
-                    return None;
-                }
-                return Some(serial.to_string());
-            }
-            None
         }
         fn get_serial_via_ioctl(device_path: &str) -> Option<String> {
             unsafe {
@@ -441,85 +437,8 @@ mod windows_impl {
             None
         }
 
-        fn get_parent_serial_from_path(device_path: &str) -> Option<String> {
-            let path_lower = device_path.to_lowercase();
-            if !path_lower.contains("&mi_") {
-                return None;
-            }
-
-            let vid_pos = path_lower.find("vid_")?;
-            let pid_pos = path_lower.find("pid_")?;
-
-            let vid_str = device_path.get(vid_pos + 4..vid_pos + 8)?;
-            let pid_end = path_lower[pid_pos + 4..]
-                .find('&')
-                .map(|p| pid_pos + 4 + p)
-                .unwrap_or(pid_pos + 8);
-            let pid_str = device_path.get(pid_pos + 4..pid_end)?;
-
-            let reg_path = format!(
-                "SYSTEM\\CurrentControlSet\\Enum\\USB\\VID_{}&PID_{}",
-                vid_str.to_uppercase(),
-                pid_str.to_uppercase()
-            );
-            unsafe {
-                use winapi::um::winreg::*;
-
-                let reg_path_wide: Vec<u16> = OsStr::new(&reg_path)
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-
-                let mut hkey: winapi::shared::minwindef::HKEY = ptr::null_mut();
-                let result = RegOpenKeyExW(
-                    HKEY_LOCAL_MACHINE,
-                    reg_path_wide.as_ptr(),
-                    0,
-                    KEY_READ,
-                    &mut hkey,
-                );
-
-                if result != 0 {
-                    return None;
-                }
-                let mut index = 0;
-                let mut name_buf = [0u16; 256];
-                let mut name_len = name_buf.len() as DWORD;
-
-                while RegEnumKeyExW(
-                    hkey,
-                    index,
-                    name_buf.as_mut_ptr(),
-                    &mut name_len,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ) == 0
-                {
-                    let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
-                    if !name.is_empty() && !name.contains('&') && name.len() < 64 {
-                        RegCloseKey(hkey);
-                        return Some(name);
-                    }
-
-                    index += 1;
-                    name_len = name_buf.len() as DWORD;
-                }
-
-                RegCloseKey(hkey);
-            }
-
-            None
-        }
         pub fn open(serial: Option<&str>) -> Result<Self, TransportError> {
             Self::open_with_mode(serial, UsbMode::Fastboot)
-        }
-        pub fn open_adb(serial: Option<&str>) -> Result<Self, TransportError> {
-            Self::open_with_mode(serial, UsbMode::Adb)
-        }
-        pub fn open_adb_by_info(info: &UsbDeviceInfo) -> Result<Self, TransportError> {
-            Self::open_device_with_mode(info, UsbMode::Adb)
         }
         fn open_with_mode(serial: Option<&str>, mode: UsbMode) -> Result<Self, TransportError> {
             let devices = match mode {
@@ -595,16 +514,6 @@ mod windows_impl {
                 match driver_type {
                     DriverType::Legacy => Self::open_legacy_device(info, &path),
                     DriverType::WinUsb => Self::open_winusb_device(info, &path, mode),
-                    DriverType::Unknown => Self::open_winusb_device(info, &path, mode)
-                        .or_else(|_| Self::open_legacy_device(info, &path))
-                        .map_err(|_| {
-                            TransportError::Usb(
-                                "无法识别设备驱动类型，WinUSB 和 Legacy 模式都失败。\n\
-                                 建议：安装 Google USB Driver。\n\
-                                 下载地址: https://developer.android.com/studio/run/win-usb"
-                                    .into(),
-                            )
-                        }),
                 }
             }
         }
@@ -640,16 +549,8 @@ mod windows_impl {
                     winusb_handle: ptr::null_mut(),
                     winusb_endpoints: None,
                     driver_type: DriverType::Legacy,
-                    serial_number: info.serial_number.clone(),
                     device_path: info.device_path.clone(),
-                    max_packet_size: if info.is_usb3 {
-                        USB3_MAX_PACKET_SIZE
-                    } else {
-                        USB2_MAX_PACKET_SIZE
-                    },
                     timeout: DEFAULT_TIMEOUT,
-                    stats: TransportStats::default(),
-                    is_usb3: info.is_usb3,
                     write_event,
                     read_event,
                 })
@@ -661,8 +562,8 @@ mod windows_impl {
             mode: UsbMode,
         ) -> Result<Self, TransportError> {
             let expected_protocol = match mode {
-                UsbMode::Fastboot => FASTBOOT_PROTOCOL,
-                UsbMode::Adb => ADB_PROTOCOL,
+                UsbMode::Fastboot => IF_PROTOCOL_FASTBOOT,
+                UsbMode::Adb => IF_PROTOCOL_ADB,
             };
 
             unsafe {
@@ -701,15 +602,14 @@ mod windows_impl {
                 }
                 let mut read_pipe: u8 = 0;
                 let mut write_pipe: u8 = 0;
-                let mut max_packet_size: u16 = 512;
 
                 let is_known_fastboot_pid = Self::is_fastboot_device(info);
                 let protocol_ok = if mode == UsbMode::Fastboot && is_known_fastboot_pid {
-                    iface_desc.bInterfaceClass == FASTBOOT_CLASS
-                        && iface_desc.bInterfaceSubClass == FASTBOOT_SUBCLASS
+                    iface_desc.bInterfaceClass == IF_CLASS_VENDOR
+                        && iface_desc.bInterfaceSubClass == IF_SUBCLASS_ANDROID
                 } else {
-                    iface_desc.bInterfaceClass == FASTBOOT_CLASS
-                        && iface_desc.bInterfaceSubClass == FASTBOOT_SUBCLASS
+                    iface_desc.bInterfaceClass == IF_CLASS_VENDOR
+                        && iface_desc.bInterfaceSubClass == IF_SUBCLASS_ANDROID
                         && iface_desc.bInterfaceProtocol == expected_protocol
                 };
 
@@ -728,14 +628,13 @@ mod windows_impl {
 
                 for i in 0..iface_desc.bNumEndpoints {
                     let mut pipe_info: WINUSB_PIPE_INFORMATION = mem::zeroed();
-                    if WinUsb_QueryPipe(winusb_handle, 0, i, &mut pipe_info) != 0 {
-                        if pipe_info.PipeType == 2 {
-                            if pipe_info.PipeId & USB_ENDPOINT_DIRECTION_IN != 0 {
-                                read_pipe = pipe_info.PipeId;
-                                max_packet_size = pipe_info.MaximumPacketSize;
-                            } else {
-                                write_pipe = pipe_info.PipeId;
-                            }
+                    if WinUsb_QueryPipe(winusb_handle, 0, i, &mut pipe_info) != 0
+                        && pipe_info.PipeType == 2
+                    {
+                        if pipe_info.PipeId & USB_ENDPOINT_DIRECTION_IN != 0 {
+                            read_pipe = pipe_info.PipeId;
+                        } else {
+                            write_pipe = pipe_info.PipeId;
                         }
                     }
                 }
@@ -764,7 +663,6 @@ mod windows_impl {
                 let endpoints = WinUsbEndpoints {
                     read_pipe,
                     write_pipe,
-                    max_packet_size,
                 };
                 let write_event = CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null());
                 let read_event = CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null());
@@ -776,12 +674,8 @@ mod windows_impl {
                     winusb_handle,
                     winusb_endpoints: Some(endpoints),
                     driver_type: DriverType::WinUsb,
-                    serial_number: info.serial_number.clone(),
                     device_path: info.device_path.clone(),
-                    max_packet_size: max_packet_size as usize,
                     timeout: DEFAULT_TIMEOUT,
-                    stats: TransportStats::default(),
-                    is_usb3: max_packet_size > 512,
                     write_event,
                     read_event,
                 })
@@ -841,14 +735,6 @@ mod windows_impl {
             }
         }
 
-        pub fn stats(&self) -> &TransportStats {
-            &self.stats
-        }
-
-        #[allow(dead_code)]
-        pub fn is_usb3(&self) -> bool {
-            self.is_usb3
-        }
         pub fn bulk_write_sync(&mut self, data: &[u8]) -> Result<usize, TransportError> {
             if data.is_empty() {
                 return Ok(0);
@@ -857,7 +743,19 @@ mod windows_impl {
             match self.driver_type {
                 DriverType::Legacy => self.legacy_write(data),
                 DriverType::WinUsb => self.winusb_write(data),
-                DriverType::Unknown => self.legacy_write(data),
+            }
+        }
+
+        /// 清理 OUT 端点的挂起/halt：写超时或提交失败后端点会 stall，不清则同一句柄后续写连环失败。
+        /// abort 取消挂起传输、flush 清 WinUSB 内部缓冲、reset 发 CLEAR_FEATURE(ENDPOINT_HALT) 复位端点。
+        fn abort_write_pipe(&self, endpoints: &WinUsbEndpoints) {
+            if self.winusb_handle.is_null() {
+                return;
+            }
+            unsafe {
+                WinUsb_AbortPipe(self.winusb_handle, endpoints.write_pipe);
+                WinUsb_FlushPipe(self.winusb_handle, endpoints.write_pipe);
+                WinUsb_ResetPipe(self.winusb_handle, endpoints.write_pipe);
             }
         }
 
@@ -872,9 +770,7 @@ mod windows_impl {
                 }
 
                 let mut total_written = 0usize;
-                let total_bytes = data.len() as f64;
-
-                const MAX_CHUNK: usize = 1 * 1024 * 1024;
+                const MAX_CHUNK: usize = 1024 * 1024;
 
                 while total_written < data.len() {
                     let chunk_size = std::cmp::min(MAX_CHUNK, data.len() - total_written);
@@ -896,6 +792,10 @@ mod windows_impl {
                     if result == 0 {
                         let err = GetLastError();
                         if err != ERROR_IO_PENDING {
+                            // 写提交即失败：端点可能已 stall，先 abort+flush+reset 清掉 halt 状态再返回，
+                            // 否则残留的挂起会让同一句柄后续写连环失败、被迫整条链路重开（对齐 winusb_read
+                            // 超时后调用 WinUsb_AbortPipe 的处理）。
+                            self.abort_write_pipe(&endpoints);
                             return Err(TransportError::Usb(format!(
                                 "WinUSB 写入失败: {}",
                                 std::io::Error::from_raw_os_error(err as i32)
@@ -910,17 +810,15 @@ mod windows_impl {
                     );
 
                     if wait_result == 0 {
-                        return Err(TransportError::Usb(format!(
-                            "WinUSB 写入等待失败: {}",
-                            std::io::Error::last_os_error()
-                        )));
+                        // PIPE_TRANSFER_TIMEOUT 到期（os error 121 / ERROR_SEM_TIMEOUT）等：OUT 端点已
+                        // 挂起，必须 abort+reset 清 halt，否则句柄连带失效、后续写全废、只能整体重开链路。
+                        let err = std::io::Error::last_os_error();
+                        self.abort_write_pipe(&endpoints);
+                        return Err(TransportError::Usb(format!("WinUSB 写入等待失败: {}", err)));
                     }
 
                     total_written += written as usize;
                 }
-
-                self.stats.bytes_sent += total_written as u64;
-                self.stats.packets_sent += 1;
 
                 Ok(total_written)
             }
@@ -935,9 +833,8 @@ mod windows_impl {
                 };
 
                 let mut total_written = 0usize;
-                let total_bytes = data.len() as f64;
                 let timeout_ms = self.timeout.as_millis() as DWORD;
-                const MAX_CHUNK: usize = 1 * 1024 * 1024;
+                const MAX_CHUNK: usize = 1024 * 1024;
 
                 while total_written < data.len() {
                     let chunk_size = std::cmp::min(MAX_CHUNK, data.len() - total_written);
@@ -965,7 +862,9 @@ mod windows_impl {
                         }
                         let wait_result = WaitForSingleObject(overlapped.hEvent, timeout_ms);
                         if wait_result != WAIT_OBJECT_0 {
+                            // CancelIo 是异步的：等被取消的传输真正结束，栈上的 OVERLAPPED 才能出栈。
                             CancelIo(handle);
+                            GetOverlappedResult(handle, &mut overlapped, &mut written, TRUE);
                             return Err(TransportError::Timeout);
                         }
                         if GetOverlappedResult(handle, &mut overlapped, &mut written, FALSE) == 0 {
@@ -979,18 +878,7 @@ mod windows_impl {
                     total_written += written as usize;
                 }
 
-                self.stats.bytes_sent += total_written as u64;
-                self.stats.packets_sent += 1;
-
                 Ok(total_written)
-            }
-        }
-        #[allow(dead_code)]
-        fn direct_write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-            if self.driver_type == DriverType::WinUsb {
-                self.winusb_write(data)
-            } else {
-                self.legacy_write(data)
             }
         }
         pub fn bulk_read_sync(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
@@ -1001,7 +889,6 @@ mod windows_impl {
             match self.driver_type {
                 DriverType::Legacy => self.legacy_read(buf),
                 DriverType::WinUsb => self.winusb_read(buf),
-                DriverType::Unknown => self.legacy_read(buf),
             }
         }
 
@@ -1046,16 +933,21 @@ mod windows_impl {
 
                 let wait_result = WaitForSingleObject(overlapped.hEvent, actual_timeout);
 
-                if wait_result == WAIT_TIMEOUT {
-                    WinUsb_AbortPipe(self.winusb_handle, endpoints.read_pipe);
-                    return Err(TransportError::Timeout);
-                }
-
                 if wait_result != WAIT_OBJECT_0 {
-                    return Err(TransportError::Usb(format!(
-                        "WinUSB 等待失败: {}",
-                        std::io::Error::last_os_error()
-                    )));
+                    let err = std::io::Error::last_os_error();
+                    // OVERLAPPED 与 buf 都在本栈帧上：取消后必须等这次传输真正结束再返回，
+                    // 否则内核回写完成状态时这块栈已被后续调用复用。
+                    WinUsb_AbortPipe(self.winusb_handle, endpoints.read_pipe);
+                    WinUsb_GetOverlappedResult(
+                        self.winusb_handle,
+                        &mut overlapped,
+                        &mut read,
+                        TRUE,
+                    );
+                    if wait_result == WAIT_TIMEOUT {
+                        return Err(TransportError::Timeout);
+                    }
+                    return Err(TransportError::Usb(format!("WinUSB 等待失败: {}", err)));
                 }
                 let get_result = WinUsb_GetOverlappedResult(
                     self.winusb_handle,
@@ -1072,9 +964,6 @@ mod windows_impl {
                         err
                     )));
                 }
-
-                self.stats.bytes_received += read as u64;
-                self.stats.packets_received += 1;
 
                 Ok(read as usize)
             }
@@ -1118,6 +1007,7 @@ mod windows_impl {
                     let wait_result = WaitForSingleObject(overlapped.hEvent, actual_timeout);
                     if wait_result != WAIT_OBJECT_0 {
                         CancelIo(handle);
+                        GetOverlappedResult(handle, &mut overlapped, &mut read, TRUE);
                         if wait_result == WAIT_TIMEOUT {
                             return Err(TransportError::Timeout);
                         }
@@ -1131,18 +1021,7 @@ mod windows_impl {
                     }
                 }
 
-                self.stats.bytes_received += read as u64;
-                self.stats.packets_received += 1;
-
                 Ok(read as usize)
-            }
-        }
-        #[allow(dead_code)]
-        fn direct_read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-            if self.driver_type == DriverType::WinUsb {
-                self.winusb_read(buf)
-            } else {
-                self.legacy_read(buf)
             }
         }
 
@@ -1152,30 +1031,6 @@ mod windows_impl {
 
         pub async fn bulk_read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
             self.bulk_read_sync(buf)
-        }
-        pub fn set_timeout(&mut self, timeout: Duration) {
-            self.timeout = timeout;
-            if self.driver_type == DriverType::WinUsb && !self.winusb_handle.is_null() {
-                if let Some(endpoints) = self.winusb_endpoints {
-                    unsafe {
-                        let mut timeout_ms: DWORD = timeout.as_millis() as DWORD;
-                        WinUsb_SetPipePolicy(
-                            self.winusb_handle,
-                            endpoints.read_pipe,
-                            PIPE_TRANSFER_TIMEOUT,
-                            mem::size_of::<DWORD>() as DWORD,
-                            &mut timeout_ms as *mut _ as *mut _,
-                        );
-                        WinUsb_SetPipePolicy(
-                            self.winusb_handle,
-                            endpoints.write_pipe,
-                            PIPE_TRANSFER_TIMEOUT,
-                            mem::size_of::<DWORD>() as DWORD,
-                            &mut timeout_ms as *mut _ as *mut _,
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -1205,6 +1060,19 @@ mod windows_impl {
     }
 
     impl AsyncTransport for UsbTransport {
+        fn diagnostic_context(&self) -> String {
+            let backend = match self.driver_type {
+                DriverType::Legacy => "Legacy",
+                DriverType::WinUsb => "WinUSB",
+            };
+            format_usb_diagnostic_context(
+                backend,
+                &self.device_path,
+                self.winusb_endpoints.map(|ep| ep.read_pipe),
+                self.winusb_endpoints.map(|ep| ep.write_pipe),
+            )
+        }
+
         fn read<'a>(
             &'a mut self,
             buf: &'a mut [u8],
@@ -1222,7 +1090,34 @@ mod windows_impl {
         fn close(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
+            // 真正释放通信句柄（旧实现是空操作）：重连前先 close 掉 driver 里那条坏链路的 WinUSB
+            // 句柄，腾出接口，避免紧接的重开 open 撞未释放的旧句柄得 ACCESS_DENIED（「端口被占用」）。
+            // 句柄置空后 Drop 会跳过重复释放；close 后本对象不应再做 IO。event 句柄留给 Drop 处理。
+            Box::pin(async move {
+                unsafe {
+                    if !self.winusb_handle.is_null() {
+                        if let Some(ep) = self.winusb_endpoints {
+                            let _ = WinUsb_AbortPipe(self.winusb_handle, ep.read_pipe);
+                            let _ = WinUsb_AbortPipe(self.winusb_handle, ep.write_pipe);
+                        }
+                        WinUsb_Free(self.winusb_handle);
+                        self.winusb_handle = ptr::null_mut();
+                    }
+                    if self.write_handle != INVALID_HANDLE_VALUE {
+                        CloseHandle(self.write_handle);
+                        self.write_handle = INVALID_HANDLE_VALUE;
+                    }
+                    if self.read_handle != INVALID_HANDLE_VALUE {
+                        CloseHandle(self.read_handle);
+                        self.read_handle = INVALID_HANDLE_VALUE;
+                    }
+                    if self.device_handle != INVALID_HANDLE_VALUE {
+                        CloseHandle(self.device_handle);
+                        self.device_handle = INVALID_HANDLE_VALUE;
+                    }
+                }
+                Ok(())
+            })
         }
 
         fn reset(
@@ -1354,476 +1249,6 @@ mod windows_impl {
                 }
             }
         }
-
-        fn max_packet_size(&self) -> usize {
-            self.max_packet_size
-        }
-
-        fn supports_bulk_optimization(&self) -> bool {
-            true
-        }
-    }
-
-    unsafe impl Send for UsbTransport {}
-    unsafe impl Sync for UsbTransport {}
-}
-
-#[cfg(not(target_os = "windows"))]
-pub use self::unix_impl::*;
-
-#[cfg(not(target_os = "windows"))]
-mod unix_impl {
-    use super::*;
-    use rusb::{Context, Device, DeviceHandle, Direction, TransferType, UsbContext};
-
-    pub struct UsbTransport {
-        handle: DeviceHandle<Context>,
-        interface_number: u8,
-        read_endpoint: u8,
-        write_endpoint: u8,
-        max_packet_size: usize,
-        timeout: Duration,
-        stats: TransportStats,
-        is_usb3: bool,
-        kernel_driver_detached: bool,
-    }
-
-    impl UsbTransport {
-        pub fn enumerate_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
-            let context = Context::new().map_err(|e| TransportError::Usb(e.to_string()))?;
-            let mut devices = Vec::new();
-
-            for device in context
-                .devices()
-                .map_err(|e| TransportError::Usb(e.to_string()))?
-                .iter()
-            {
-                if let Some(info) = Self::check_fastboot_device(&device) {
-                    devices.push(info);
-                }
-            }
-
-            Ok(devices)
-        }
-
-        fn check_fastboot_device(device: &Device<Context>) -> Option<UsbDeviceInfo> {
-            let desc = device.device_descriptor().ok()?;
-            let vid = desc.vendor_id();
-            let pid = desc.product_id();
-
-            for config_idx in 0..desc.num_configurations() {
-                let config = device.config_descriptor(config_idx).ok()?;
-                for iface in config.interfaces() {
-                    for iface_desc in iface.descriptors() {
-                        if iface_desc.class_code() == FASTBOOT_CLASS
-                            && iface_desc.sub_class_code() == FASTBOOT_SUBCLASS
-                            && iface_desc.protocol_code() == FASTBOOT_PROTOCOL
-                        {
-                            let handle = device.open().ok();
-                            let serial = handle
-                                .as_ref()
-                                .and_then(|h| h.read_serial_number_string_ascii(&desc).ok())
-                                .unwrap_or_else(|| format!("{:04x}:{:04x}", vid, pid));
-                            let product_name = handle
-                                .as_ref()
-                                .and_then(|h| h.read_product_string_ascii(&desc).ok());
-                            let manufacturer = handle
-                                .as_ref()
-                                .and_then(|h| h.read_manufacturer_string_ascii(&desc).ok());
-                            let is_usb3 = iface_desc
-                                .endpoint_descriptors()
-                                .any(|ep| ep.max_packet_size() > 512);
-
-                            return Some(UsbDeviceInfo {
-                                vendor_id: vid,
-                                product_id: pid,
-                                serial_number: serial,
-                                device_path: format!(
-                                    "{}:{}",
-                                    device.bus_number(),
-                                    device.address()
-                                ),
-                                is_usb3,
-                                product_name,
-                                manufacturer,
-                            });
-                        }
-                    }
-                }
-            }
-            None
-        }
-        fn check_adb_device(device: &Device<Context>) -> Option<UsbDeviceInfo> {
-            let desc = device.device_descriptor().ok()?;
-            let vid = desc.vendor_id();
-            let pid = desc.product_id();
-
-            for config_idx in 0..desc.num_configurations() {
-                let config = device.config_descriptor(config_idx).ok()?;
-                for iface in config.interfaces() {
-                    for iface_desc in iface.descriptors() {
-                        if iface_desc.class_code() == FASTBOOT_CLASS
-                            && iface_desc.sub_class_code() == FASTBOOT_SUBCLASS
-                            && iface_desc.protocol_code() == ADB_PROTOCOL
-                        {
-                            let handle = device.open().ok();
-                            let serial = handle
-                                .as_ref()
-                                .and_then(|h| h.read_serial_number_string_ascii(&desc).ok())
-                                .unwrap_or_else(|| format!("{:04x}:{:04x}", vid, pid));
-                            let product_name = handle
-                                .as_ref()
-                                .and_then(|h| h.read_product_string_ascii(&desc).ok());
-                            let manufacturer = handle
-                                .as_ref()
-                                .and_then(|h| h.read_manufacturer_string_ascii(&desc).ok());
-                            let is_usb3 = iface_desc
-                                .endpoint_descriptors()
-                                .any(|ep| ep.max_packet_size() > 512);
-
-                            return Some(UsbDeviceInfo {
-                                vendor_id: vid,
-                                product_id: pid,
-                                serial_number: serial,
-                                device_path: format!(
-                                    "{}:{}",
-                                    device.bus_number(),
-                                    device.address()
-                                ),
-                                is_usb3,
-                                product_name,
-                                manufacturer,
-                            });
-                        }
-                    }
-                }
-            }
-            None
-        }
-        pub fn enumerate_adb_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
-            let context = Context::new().map_err(|e| TransportError::Usb(e.to_string()))?;
-            let mut devices = Vec::new();
-
-            for device in context
-                .devices()
-                .map_err(|e| TransportError::Usb(e.to_string()))?
-                .iter()
-            {
-                if let Some(info) = Self::check_adb_device(&device) {
-                    devices.push(info);
-                }
-            }
-
-            Ok(devices)
-        }
-        pub fn open_adb(serial: Option<&str>) -> Result<Self, TransportError> {
-            let devices = Self::enumerate_adb_devices()?;
-
-            let device_info = match serial {
-                Some(s) => devices
-                    .into_iter()
-                    .find(|d| d.serial_number == s)
-                    .ok_or_else(|| TransportError::Usb(format!("设备 '{}' 未找到", s)))?,
-                None => {
-                    if devices.is_empty() {
-                        return Err(TransportError::Usb("无设备".into()));
-                    }
-                    if devices.len() > 1 {
-                        return Err(TransportError::Usb("多设备，请使用 -s 指定".into()));
-                    }
-                    devices.into_iter().next().unwrap()
-                }
-            };
-
-            Self::open_adb_device(&device_info)
-        }
-        fn open_adb_device(info: &UsbDeviceInfo) -> Result<Self, TransportError> {
-            let context = Context::new().map_err(|e| TransportError::Usb(e.to_string()))?;
-            let parts: Vec<&str> = info.device_path.split(':').collect();
-            let bus: u8 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let addr: u8 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-            let device = context
-                .devices()
-                .map_err(|e| TransportError::Usb(e.to_string()))?
-                .iter()
-                .find(|d| d.bus_number() == bus && d.address() == addr)
-                .ok_or_else(|| TransportError::Usb("Device disconnected".into()))?;
-
-            let mut handle = device
-                .open()
-                .map_err(|e| TransportError::Usb(format!("Cannot open device: {}", e)))?;
-
-            let (iface_num, read_ep, write_ep) = Self::find_adb_interface(&device)?;
-
-            let mut kernel_driver_detached = false;
-            if handle.kernel_driver_active(iface_num).unwrap_or(false) {
-                handle.detach_kernel_driver(iface_num).map_err(|e| {
-                    TransportError::Usb(format!("Cannot detach kernel driver: {}", e))
-                })?;
-                kernel_driver_detached = true;
-            }
-
-            handle
-                .claim_interface(iface_num)
-                .map_err(|e| TransportError::Usb(format!("Cannot claim interface: {}", e)))?;
-
-            Ok(Self {
-                handle,
-                interface_number: iface_num,
-                read_endpoint: read_ep,
-                write_endpoint: write_ep,
-                max_packet_size: if info.is_usb3 {
-                    USB3_MAX_PACKET_SIZE
-                } else {
-                    USB2_MAX_PACKET_SIZE
-                },
-                timeout: DEFAULT_TIMEOUT,
-                stats: TransportStats::default(),
-                is_usb3: info.is_usb3,
-                kernel_driver_detached,
-            })
-        }
-        fn find_adb_interface(device: &Device<Context>) -> Result<(u8, u8, u8), TransportError> {
-            let desc = device
-                .device_descriptor()
-                .map_err(|e| TransportError::Usb(e.to_string()))?;
-
-            for config_idx in 0..desc.num_configurations() {
-                let config = device
-                    .config_descriptor(config_idx)
-                    .map_err(|e| TransportError::Usb(e.to_string()))?;
-
-                for iface in config.interfaces() {
-                    for iface_desc in iface.descriptors() {
-                        if iface_desc.class_code() == FASTBOOT_CLASS
-                            && iface_desc.sub_class_code() == FASTBOOT_SUBCLASS
-                            && iface_desc.protocol_code() == ADB_PROTOCOL
-                        {
-                            let mut read_ep = None;
-                            let mut write_ep = None;
-
-                            for ep in iface_desc.endpoint_descriptors() {
-                                if ep.transfer_type() == TransferType::Bulk {
-                                    match ep.direction() {
-                                        Direction::In => read_ep = Some(ep.address()),
-                                        Direction::Out => write_ep = Some(ep.address()),
-                                    }
-                                }
-                            }
-
-                            if let (Some(r), Some(w)) = (read_ep, write_ep) {
-                                return Ok((iface_desc.interface_number(), r, w));
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(TransportError::Usb("接口未找到".into()))
-        }
-
-        pub fn open(serial: Option<&str>) -> Result<Self, TransportError> {
-            let devices = Self::enumerate_devices()?;
-
-            let device_info = match serial {
-                Some(s) => devices
-                    .into_iter()
-                    .find(|d| d.serial_number == s)
-                    .ok_or_else(|| TransportError::Usb(format!("Device '{}' not found", s)))?,
-                None => {
-                    if devices.is_empty() {
-                        return Err(TransportError::Usb("No fastboot devices found".into()));
-                    }
-                    if devices.len() > 1 {
-                        return Err(TransportError::Usb(
-                            "Multiple devices found, use -s to specify".into(),
-                        ));
-                    }
-                    devices.into_iter().next().unwrap()
-                }
-            };
-
-            Self::open_device(&device_info)
-        }
-
-        fn open_device(info: &UsbDeviceInfo) -> Result<Self, TransportError> {
-            let context = Context::new().map_err(|e| TransportError::Usb(e.to_string()))?;
-            let parts: Vec<&str> = info.device_path.split(':').collect();
-            let bus: u8 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let addr: u8 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-            let device = context
-                .devices()
-                .map_err(|e| TransportError::Usb(e.to_string()))?
-                .iter()
-                .find(|d| d.bus_number() == bus && d.address() == addr)
-                .ok_or_else(|| TransportError::Usb("Device disconnected".into()))?;
-
-            let mut handle = device
-                .open()
-                .map_err(|e| TransportError::Usb(format!("Cannot open device: {}", e)))?;
-
-            let (iface_num, read_ep, write_ep) = Self::find_fastboot_interface(&device)?;
-
-            let mut kernel_driver_detached = false;
-            if handle.kernel_driver_active(iface_num).unwrap_or(false) {
-                handle.detach_kernel_driver(iface_num).map_err(|e| {
-                    TransportError::Usb(format!("Cannot detach kernel driver: {}", e))
-                })?;
-                kernel_driver_detached = true;
-            }
-
-            handle
-                .claim_interface(iface_num)
-                .map_err(|e| TransportError::Usb(format!("Cannot claim interface: {}", e)))?;
-
-            Ok(Self {
-                handle,
-                interface_number: iface_num,
-                read_endpoint: read_ep,
-                write_endpoint: write_ep,
-                max_packet_size: if info.is_usb3 {
-                    USB3_MAX_PACKET_SIZE
-                } else {
-                    USB2_MAX_PACKET_SIZE
-                },
-                timeout: DEFAULT_TIMEOUT,
-                stats: TransportStats::default(),
-                is_usb3: info.is_usb3,
-                kernel_driver_detached,
-            })
-        }
-
-        fn find_fastboot_interface(
-            device: &Device<Context>,
-        ) -> Result<(u8, u8, u8), TransportError> {
-            let desc = device
-                .device_descriptor()
-                .map_err(|e| TransportError::Usb(e.to_string()))?;
-
-            for config_idx in 0..desc.num_configurations() {
-                let config = device
-                    .config_descriptor(config_idx)
-                    .map_err(|e| TransportError::Usb(e.to_string()))?;
-
-                for iface in config.interfaces() {
-                    for iface_desc in iface.descriptors() {
-                        if iface_desc.class_code() == FASTBOOT_CLASS
-                            && iface_desc.sub_class_code() == FASTBOOT_SUBCLASS
-                            && iface_desc.protocol_code() == FASTBOOT_PROTOCOL
-                        {
-                            let mut read_ep = None;
-                            let mut write_ep = None;
-
-                            for ep in iface_desc.endpoint_descriptors() {
-                                if ep.transfer_type() == TransferType::Bulk {
-                                    match ep.direction() {
-                                        Direction::In => read_ep = Some(ep.address()),
-                                        Direction::Out => write_ep = Some(ep.address()),
-                                    }
-                                }
-                            }
-
-                            if let (Some(r), Some(w)) = (read_ep, write_ep) {
-                                return Ok((iface_desc.interface_number(), r, w));
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(TransportError::Usb("Fastboot interface not found".into()))
-        }
-
-        pub fn stats(&self) -> &TransportStats {
-            &self.stats
-        }
-
-        pub fn is_usb3(&self) -> bool {
-            self.is_usb3
-        }
-
-        pub fn set_timeout(&mut self, timeout: Duration) {
-            self.timeout = timeout;
-        }
-
-        pub fn bulk_write_sync(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-            let written = self
-                .handle
-                .write_bulk(self.write_endpoint, data, self.timeout)
-                .map_err(|e| TransportError::Usb(format!("Write failed: {}", e)))?;
-            self.stats.bytes_sent += written as u64;
-            self.stats.packets_sent += 1;
-            Ok(written)
-        }
-
-        pub fn bulk_read_sync(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-            let read = self
-                .handle
-                .read_bulk(self.read_endpoint, buf, self.timeout)
-                .map_err(|e| TransportError::Usb(format!("Read failed: {}", e)))?;
-            self.stats.bytes_received += read as u64;
-            self.stats.packets_received += 1;
-            Ok(read)
-        }
-
-        pub async fn bulk_write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-            self.bulk_write_sync(data)
-        }
-
-        pub async fn bulk_read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-            self.bulk_read_sync(buf)
-        }
-    }
-
-    impl Drop for UsbTransport {
-        fn drop(&mut self) {
-            let _ = self.handle.release_interface(self.interface_number);
-            if self.kernel_driver_detached {
-                let _ = self.handle.attach_kernel_driver(self.interface_number);
-            }
-        }
-    }
-
-    impl AsyncTransport for UsbTransport {
-        fn read<'a>(
-            &'a mut self,
-            buf: &'a mut [u8],
-        ) -> Pin<Box<dyn Future<Output = Result<usize, TransportError>> + Send + 'a>> {
-            Box::pin(async move { self.bulk_read(buf).await })
-        }
-
-        fn write<'a>(
-            &'a mut self,
-            data: &'a [u8],
-        ) -> Pin<Box<dyn Future<Output = Result<usize, TransportError>> + Send + 'a>> {
-            Box::pin(async move { self.bulk_write(data).await })
-        }
-
-        fn close(
-            &mut self,
-        ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
-        }
-
-        fn reset(
-            &mut self,
-        ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
-            Box::pin(async move {
-                self.handle
-                    .reset()
-                    .map_err(|e| TransportError::Usb(format!("Reset failed: {}", e)))
-            })
-        }
-
-        fn max_packet_size(&self) -> usize {
-            self.max_packet_size
-        }
-
-        fn supports_bulk_optimization(&self) -> bool {
-            true
-        }
     }
 
     unsafe impl Send for UsbTransport {}
@@ -1834,20 +1259,12 @@ mod unix_impl {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_constants() {
-        assert_eq!(FASTBOOT_CLASS, 0xFF);
-        assert_eq!(FASTBOOT_SUBCLASS, 0x42);
-        assert_eq!(FASTBOOT_PROTOCOL, 0x03);
-    }
-
     #[tokio::test]
     async fn test_enumerate_no_panic() {
         let result = UsbTransport::enumerate_devices();
         assert!(result.is_ok());
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn test_parse_vid_pid() {
         use windows_impl::UsbTransport;
@@ -1857,13 +1274,34 @@ mod tests {
         assert_eq!(result, Some((0x18d1, 0xd00d)));
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn test_extract_serial() {
-        use windows_impl::UsbTransport;
+    fn diagnostic_context_keeps_interface_fields_and_omits_device_instance() {
+        let path = r"\\?\usb#vid_18d1&pid_d00d&mi_01#private-serial#{private-guid}";
+        let context = format_usb_diagnostic_context("WinUSB", path, Some(0x83), Some(0x02));
+        assert_eq!(
+            context,
+            "backend=WinUSB vid=0x18d1 pid=0xd00d mi=0x01 read_pipe=0x83 write_pipe=0x02"
+        );
+        let other_instance = r"\\?\USB#VID_18D1&PID_D00D&MI_01#different-serial#{different-guid}";
+        assert_eq!(
+            context,
+            format_usb_diagnostic_context("WinUSB", other_instance, Some(0x83), Some(0x02))
+        );
+        assert!(!context.contains("private"));
+        assert!(!context.contains("serial"));
+        assert!(!context.contains("guid"));
+    }
 
-        let path = r"\\?\usb#vid_18d1&pid_d00d#abc123#{f72fe0d4-cbcb-407d-8814-9ed673d0dd6b}";
-        let result = UsbTransport::extract_serial_from_path(path);
-        assert_eq!(result, Some("abc123".to_string()));
+    #[test]
+    fn diagnostic_context_does_not_extract_fields_from_device_instance() {
+        let path = r"\\?\usb#vid_18d1&pid_d00d#serial&mi_ff&pid_ffff#{private-guid}";
+        assert_eq!(
+            format_usb_diagnostic_context("Legacy", path, None, None),
+            "backend=Legacy vid=0x18d1 pid=0xd00d mi=unknown read_pipe=n/a write_pipe=n/a"
+        );
+        assert_eq!(
+            format_usb_diagnostic_context("WinUSB", r"E:\secret-session\private-token", None, None),
+            "backend=WinUSB vid=unknown pid=unknown mi=unknown read_pipe=n/a write_pipe=n/a"
+        );
     }
 }
