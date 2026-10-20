@@ -289,7 +289,7 @@ impl AdbTcpDevice {
                         pub_key.push(0);
                     }
                     if auth_attempts == 1 {
-                        println!("Please confirm the wireless debugging authorization prompt on the device.");
+                        crate::progress::print_info("Please confirm the wireless debugging authorization prompt on the device.");
                     }
                     auth_attempts += 1;
                     self.write_message(A_AUTH, 3, 0, &pub_key)
@@ -701,11 +701,13 @@ impl AdbTcpDevice {
     }
 
     pub fn print_service(&mut self, service: &str) -> Result<(), String> {
+        let mut output = Vec::new();
         self.execute_service_streaming(service, |payload| {
-            print!("{}", String::from_utf8_lossy(payload));
-            let _ = std::io::stdout().flush();
+            output.extend_from_slice(payload);
             Ok(())
-        })
+        })?;
+        crate::progress::print_info(&String::from_utf8_lossy(&output));
+        Ok(())
     }
 
     pub fn sideload(&mut self, package_path: &str) -> Result<(), String> {

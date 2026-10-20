@@ -53,7 +53,7 @@ pub fn run_reverser_process() -> ! {
             if !ready_sent {
                 write_ready(&ready_file, &format!("ERR\t{}", e));
             }
-            eprintln!("adb reverser failed: {}", e);
+            crate::progress::print_error(&format!("adb reverser failed: {}", e));
             1
         }
     };
@@ -62,9 +62,9 @@ pub fn run_reverser_process() -> ! {
 
 pub fn handle_reverse_command(serial: Option<&str>, args: &[String]) -> i32 {
     if args.is_empty() {
-        eprintln!(
+        crate::progress::print_error(&format!(
             "usage: adb reverse [--list] [--remove REMOTE] [--remove-all] [--no-rebind] REMOTE LOCAL"
-        );
+        ));
         return 1;
     }
 
@@ -79,13 +79,13 @@ pub fn handle_reverse_command(serial: Option<&str>, args: &[String]) -> i32 {
         }
         "--remove" => {
             let Some(remote) = args.get(1) else {
-                eprintln!("adb reverse --remove requires REMOTE");
+                crate::progress::print_error(&format!("adb reverse --remove requires REMOTE"));
                 return 1;
             };
             return match remove_reverse(serial, remote) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     1
                 }
             };
@@ -101,11 +101,11 @@ pub fn handle_reverse_command(serial: Option<&str>, args: &[String]) -> i32 {
     }
 
     let Some(remote) = args.get(position) else {
-        eprintln!("adb reverse requires REMOTE and LOCAL");
+        crate::progress::print_error(&format!("adb reverse requires REMOTE and LOCAL"));
         return 1;
     };
     let Some(local) = args.get(position + 1) else {
-        eprintln!("adb reverse requires REMOTE and LOCAL");
+        crate::progress::print_error(&format!("adb reverse requires REMOTE and LOCAL"));
         return 1;
     };
 
@@ -121,7 +121,7 @@ pub fn handle_reverse_command(serial: Option<&str>, args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             1
         }
     }

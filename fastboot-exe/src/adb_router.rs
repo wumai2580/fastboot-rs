@@ -249,7 +249,7 @@ pub fn try_handle_adb_args() -> Option<i32> {
     let cmd = cmd_lower.as_str();
     // 本实现只接管 USB 与 `adb connect` 的网络设备，没有模拟器 transport：`-e` 如实报无模拟器。
     if parsed.selector == AdbSelector::EmulatorOnly && !command_is_host_only(cmd) {
-        eprintln!("adb: error: no emulators found");
+        crate::progress::print_error(&format!("adb: error: no emulators found"));
         return Some(1);
     }
     if cmd.starts_with("wait-for") {
@@ -304,14 +304,14 @@ pub fn try_handle_adb_args() -> Option<i32> {
         "install-multi-package" => handle_install_multi_package_native(serial, &args[1..]),
         "exec-out" => {
             if args.len() < 2 {
-                eprintln!("adb exec-out requires COMMAND");
+                crate::progress::print_error(&format!("adb exec-out requires COMMAND"));
                 return Some(1);
             }
             handle_stream_service(serial, &format!("exec:{}", args[1..].join(" ")), "exec-out")
         }
         "abb" => {
             if args.len() < 2 {
-                eprintln!("adb abb requires ARGS");
+                crate::progress::print_error(&format!("adb abb requires ARGS"));
                 return Some(1);
             }
             // abb_exec 是裸输出通道（参数以 NUL 分隔、不经 shell）；拿不到退出码，输出与官方一致。
@@ -334,10 +334,10 @@ pub fn try_handle_adb_args() -> Option<i32> {
         | "reconnect"
         | "attach"
         | "detach" => {
-            eprintln!(
+            crate::progress::print_error(&format!(
                 "adb {}: 本实现不支持（无模拟器控制台 / 无线配对 / 增量安装 / USB 重新挂接）",
                 args[0]
-            );
+            ));
             Some(1)
         }
         "uninstall" => handle_uninstall_native(serial, &args[1..]),
@@ -377,8 +377,8 @@ pub fn try_handle_adb_args() -> Option<i32> {
         }
         // 未知命令必须报错并非零退出：静默 exit(0) 会让脚本把「没实现」当成「执行成功」。
         _ => {
-            eprintln!("adb: unknown command {}", args[0]);
-            eprintln!("用 `adb help` 查看支持的命令");
+            crate::progress::print_error(&format!("adb: unknown command {}", args[0]));
+            crate::progress::print_error(&format!("用 `adb help` 查看支持的命令"));
             Some(1)
         }
     }
@@ -397,14 +397,14 @@ fn handle_simple_service(serial: Option<&str>, service: &str, what: &str) -> Opt
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     match print_service(&mut dev, service) {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("{} failed: {}", what, e);
+            crate::progress::print_error(&format!("{} failed: {}", what, e));
             Some(1)
         }
     }
@@ -419,7 +419,7 @@ fn handle_stream_service(serial: Option<&str>, service: &str, what: &str) -> Opt
         }) {
             Some(Ok(())) => Some(0),
             Some(Err(e)) => {
-                eprintln!("{} failed: {}", what, e.trim());
+                crate::progress::print_error(&format!("{} failed: {}", what, e.trim()));
                 Some(1)
             }
             None => Some(mux_no_fallback(what)),
@@ -428,12 +428,12 @@ fn handle_stream_service(serial: Option<&str>, service: &str, what: &str) -> Opt
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     if let Err(e) = dev.prepare_long_lived() {
-        eprintln!("{}", e);
+        crate::progress::print_error(&format!("{}", e));
         return Some(1);
     }
     let result = dev.execute_service_streaming(service, |payload| {
@@ -445,7 +445,7 @@ fn handle_stream_service(serial: Option<&str>, service: &str, what: &str) -> Opt
     match result {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("{} failed: {}", what, e);
+            crate::progress::print_error(&format!("{} failed: {}", what, e));
             Some(1)
         }
     }
@@ -494,7 +494,7 @@ fn handle_get_serialno(serial: Option<&str>, devpath: bool) -> Option<i32> {
             Some(0)
         }
         Err(e) => {
-            eprintln!("adb: error: {}", e);
+            crate::progress::print_error(&format!("adb: error: {}", e));
             Some(1)
         }
     }
@@ -503,7 +503,7 @@ fn handle_get_serialno(serial: Option<&str>, devpath: bool) -> Option<i32> {
 /// `adb keygen FILE`：生成 FILE（私钥）与 FILE.pub（公钥），不动 ~/.android/adbkey。
 fn handle_keygen(args: &[String]) -> Option<i32> {
     let Some(path) = args.first() else {
-        eprintln!("adb keygen requires FILE");
+        crate::progress::print_error(&format!("adb keygen requires FILE"));
         return Some(1);
     };
     match crate::crypto::keygen(Path::new(path)) {
@@ -512,7 +512,7 @@ fn handle_keygen(args: &[String]) -> Option<i32> {
             Some(0)
         }
         Err(e) => {
-            eprintln!("adb keygen failed: {}", e);
+            crate::progress::print_error(&format!("adb keygen failed: {}", e));
             Some(1)
         }
     }
@@ -545,18 +545,23 @@ fn handle_backup(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let (service, file) = match backup_service(args) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     let mut out = match fs::File::create(&file) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("adb: backup unable to create file '{}': {}", file, e);
+            crate::progress::print_error(&format!(
+                "adb: backup unable to create file '{}': {}",
+                file, e
+            ));
             return Some(1);
         }
     };
-    eprintln!("Now unlock your device and confirm the backup operation...");
+    crate::progress::print_error(&format!(
+        "Now unlock your device and confirm the backup operation..."
+    ));
     let result = if should_route_via_mux() {
         match crate::adb_mux_client::retry_via_server(|| {
             crate::adb_mux_client::stream_service_to(serial, &service, &mut out)
@@ -576,7 +581,7 @@ fn handle_backup(serial: Option<&str>, args: &[String]) -> Option<i32> {
     match result {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("adb backup failed: {}", e);
+            crate::progress::print_error(&format!("adb backup failed: {}", e));
             Some(1)
         }
     }
@@ -585,17 +590,19 @@ fn handle_backup(serial: Option<&str>, args: &[String]) -> Option<i32> {
 /// `adb restore FILE`：把 .ab 文件整段写给设备的 `restore:` 服务，设备弹窗确认后恢复。
 fn handle_restore(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let Some(path) = args.first() else {
-        eprintln!("adb restore requires FILE");
+        crate::progress::print_error(&format!("adb restore requires FILE"));
         return Some(1);
     };
     let mut file = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("adb: unable to open file {}: {}", path, e);
+            crate::progress::print_error(&format!("adb: unable to open file {}: {}", path, e));
             return Some(1);
         }
     };
-    eprintln!("Now unlock your device and confirm the restore operation.");
+    crate::progress::print_error(&format!(
+        "Now unlock your device and confirm the restore operation."
+    ));
     let result = if should_route_via_mux() {
         match crate::adb_mux_client::retry_via_server(|| {
             crate::adb_mux_client::exec_with_stdin(serial, "restore:", &mut file)
@@ -615,7 +622,7 @@ fn handle_restore(serial: Option<&str>, args: &[String]) -> Option<i32> {
             Some(0)
         }
         Err(e) => {
-            eprintln!("adb restore failed: {}", e);
+            crate::progress::print_error(&format!("adb restore failed: {}", e));
             Some(1)
         }
     }
@@ -634,11 +641,13 @@ fn handle_install_multi_package_native(serial: Option<&str>, args: &[String]) ->
         .cloned()
         .collect();
     if apks.is_empty() {
-        eprintln!("adb install-multi-package requires at least one APK");
+        crate::progress::print_error(&format!(
+            "adb install-multi-package requires at least one APK"
+        ));
         return Some(1);
     }
     if let Some(missing) = apks.iter().find(|apk| !Path::new(apk.as_str()).exists()) {
-        eprintln!("APK does not exist: {}", missing);
+        crate::progress::print_error(&format!("APK does not exist: {}", missing));
         return Some(1);
     }
     let result = if should_route_via_mux() {
@@ -666,7 +675,7 @@ fn adb_feature_list() -> &'static str {
 fn mux_no_fallback(what: &str) -> i32 {
     let msg =
         format!("adb {what}: 5037 上的 adb server 不可用，已阻止直连回退（避免与它争用设备句柄）");
-    eprintln!("{}", msg);
+    crate::progress::print_error(&format!("{}", msg));
     crate::logger::log_line(&format!("[adb-mux-client] {}", msg));
     1
 }
@@ -891,13 +900,13 @@ fn default_pull_local_path(remote: &str, local: Option<&str>) -> PathBuf {
 
 fn handle_push_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     if args.len() < 2 {
-        eprintln!("adb push requires LOCAL REMOTE");
+        crate::progress::print_error(&format!("adb push requires LOCAL REMOTE"));
         return Some(1);
     }
 
     let local_path = Path::new(&args[0]);
     if !local_path.exists() {
-        eprintln!("Local path does not exist: {}", args[0]);
+        crate::progress::print_error(&format!("Local path does not exist: {}", args[0]));
         return Some(1);
     }
 
@@ -913,11 +922,11 @@ fn handle_push_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
             if let Some(result) = outcome {
                 return match result {
                     Ok(()) => {
-                        println!("{}: 1 file pushed", args[1]);
+                        crate::progress::print_success(&format!("{}: 1 file pushed", args[1]));
                         Some(0)
                     }
                     Err(e) => {
-                        eprintln!("Push failed: {}", e);
+                        crate::progress::print_error(&format!("Push failed: {}", e));
                         Some(1)
                     }
                 };
@@ -930,18 +939,23 @@ fn handle_push_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
 
     match push_path_recursive(&mut dev, local_path, &args[1], false) {
         Ok(count) => {
-            println!("{}: {} file{} pushed", args[1], count, plural_s(count));
+            crate::progress::print_success(&format!(
+                "{}: {} file{} pushed",
+                args[1],
+                count,
+                plural_s(count)
+            ));
             Some(0)
         }
         Err(e) => {
-            eprintln!("Push failed: {}", e);
+            crate::progress::print_error(&format!("Push failed: {}", e));
             Some(1)
         }
     }
@@ -949,7 +963,7 @@ fn handle_push_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
 
 fn handle_pull_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let Some(remote) = args.first() else {
-        eprintln!("adb pull requires REMOTE [LOCAL]");
+        crate::progress::print_error(&format!("adb pull requires REMOTE [LOCAL]"));
         return Some(1);
     };
     let local_path = default_pull_local_path(remote, args.get(1).map(String::as_str));
@@ -959,11 +973,11 @@ fn handle_pull_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
             crate::adb_mux_client::pull(serial, remote, &local_path)
         }) {
             Some(Ok(())) => {
-                println!("{}: 1 file pulled", remote);
+                crate::progress::print_success(&format!("{}: 1 file pulled", remote));
                 Some(0)
             }
             Some(Err(e)) => {
-                eprintln!("Pull failed: {}", e);
+                crate::progress::print_error(&format!("Pull failed: {}", e));
                 Some(1)
             }
             None => Some(mux_no_fallback("pull")),
@@ -973,18 +987,18 @@ fn handle_pull_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
 
     match dev.pull(remote, &local_path.to_string_lossy()) {
         Ok(()) => {
-            println!("{}: 1 file pulled", remote);
+            crate::progress::print_success(&format!("{}: 1 file pulled", remote));
             Some(0)
         }
         Err(e) => {
-            eprintln!("Pull failed: {}", e);
+            crate::progress::print_error(&format!("Pull failed: {}", e));
             Some(1)
         }
     }
@@ -992,11 +1006,11 @@ fn handle_pull_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
 
 fn handle_install_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let Some(apk) = args.last() else {
-        eprintln!("adb install requires APK");
+        crate::progress::print_error(&format!("adb install requires APK"));
         return Some(1);
     };
     if !Path::new(apk).exists() {
-        eprintln!("APK does not exist: {}", apk);
+        crate::progress::print_error(&format!("APK does not exist: {}", apk));
         return Some(1);
     }
     let options = &args[..args.len() - 1];
@@ -1023,11 +1037,11 @@ fn handle_install_multiple_native(serial: Option<&str>, args: &[String]) -> Opti
         .cloned()
         .collect();
     if apks.is_empty() {
-        eprintln!("adb install-multiple requires at least one APK");
+        crate::progress::print_error(&format!("adb install-multiple requires at least one APK"));
         return Some(1);
     }
     if let Some(missing) = apks.iter().find(|apk| !Path::new(apk.as_str()).exists()) {
-        eprintln!("APK does not exist: {}", missing);
+        crate::progress::print_error(&format!("APK does not exist: {}", missing));
         return Some(1);
     }
     let result = if should_route_via_mux() {
@@ -1046,12 +1060,12 @@ fn handle_install_multiple_native(serial: Option<&str>, args: &[String]) -> Opti
 fn print_install_result(result: Result<String, String>) -> i32 {
     match result {
         Ok(output) => {
-            println!("{}", output);
+            crate::progress::print_success(&output);
             let _ = io::stdout().flush();
             0
         }
         Err(e) => {
-            eprintln!("{}", e.trim());
+            crate::progress::print_error(&format!("{}", e.trim()));
             1
         }
     }
@@ -1090,7 +1104,7 @@ impl crate::adb_install::InstallConn for AdbDevice {
 
 fn handle_uninstall_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     if args.is_empty() {
-        eprintln!("adb uninstall requires PACKAGE");
+        crate::progress::print_error(&format!("adb uninstall requires PACKAGE"));
         return Some(1);
     }
     let cmd = format!("pm uninstall {}", args.join(" "));
@@ -1100,12 +1114,12 @@ fn handle_uninstall_native(serial: Option<&str>, args: &[String]) -> Option<i32>
             crate::adb_mux_client::capture_shell_result(serial, &cmd)
         }) {
             Some(Ok(output)) => {
-                print!("{}", output);
+                crate::progress::print_info(&output);
                 let _ = io::stdout().flush();
                 Some(if output.contains("Success") { 0 } else { 1 })
             }
             Some(Err(e)) => {
-                eprintln!("{}", e.trim());
+                crate::progress::print_error(&format!("{}", e.trim()));
                 Some(1)
             }
             None => Some(mux_no_fallback("uninstall")),
@@ -1119,12 +1133,12 @@ fn handle_uninstall_native(serial: Option<&str>, args: &[String]) -> Option<i32>
     };
     match result {
         Ok(output) => {
-            print!("{}", output);
+            crate::progress::print_info(&output);
             let _ = io::stdout().flush();
             Some(if output.contains("Success") { 0 } else { 1 })
         }
         Err(e) => {
-            eprintln!("{}", e.trim());
+            crate::progress::print_error(&format!("{}", e.trim()));
             Some(1)
         }
     }
@@ -1149,7 +1163,7 @@ fn handle_logcat_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1169,7 +1183,7 @@ fn handle_logcat_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     ) {
         Ok(exit) => Some(exit.code),
         Err(e) => {
-            eprintln!("logcat failed: {}", e);
+            crate::progress::print_error(&format!("logcat failed: {}", e));
             Some(1)
         }
     }
@@ -1212,14 +1226,14 @@ fn handle_reboot_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     match dev.reboot(target) {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("Reboot failed: {}", e);
+            crate::progress::print_error(&format!("Reboot failed: {}", e));
             Some(1)
         }
     }
@@ -1244,7 +1258,7 @@ fn handle_root_native(serial: Option<&str>, root: bool) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1252,7 +1266,7 @@ fn handle_root_native(serial: Option<&str>, root: bool) -> Option<i32> {
     match result {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             Some(1)
         }
     }
@@ -1290,14 +1304,14 @@ fn handle_remount_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
 
     let result = print_service(&mut dev, &service);
     if let Err(e) = result {
-        eprintln!("remount failed: {}", e);
+        crate::progress::print_error(&format!("remount failed: {}", e));
         return Some(1);
     }
     if auto_reboot {
@@ -1308,11 +1322,11 @@ fn handle_remount_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
 
 fn handle_tcpip_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let Some(port) = args.first() else {
-        eprintln!("adb tcpip requires PORT");
+        crate::progress::print_error(&format!("adb tcpip requires PORT"));
         return Some(1);
     };
     if port.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
-        eprintln!("invalid tcp port: {}", port);
+        crate::progress::print_error(&format!("invalid tcp port: {}", port));
         return Some(1);
     }
 
@@ -1329,14 +1343,14 @@ fn handle_tcpip_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     match print_service(&mut dev, &service) {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("tcpip failed: {}", e);
+            crate::progress::print_error(&format!("tcpip failed: {}", e));
             Some(1)
         }
     }
@@ -1355,14 +1369,14 @@ fn handle_usb_native(serial: Option<&str>) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
     match print_service(&mut dev, "usb:") {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("usb failed: {}", e);
+            crate::progress::print_error(&format!("usb failed: {}", e));
             Some(1)
         }
     }
@@ -1370,7 +1384,7 @@ fn handle_usb_native(serial: Option<&str>) -> Option<i32> {
 
 fn handle_bugreport_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     if args.len() > 1 {
-        eprintln!("adb bugreport accepts at most one PATH");
+        crate::progress::print_error(&format!("adb bugreport accepts at most one PATH"));
         return Some(1);
     }
     // 5037 上有 server（GUI 进程内 mux / 投屏 mux / 官方 adb）时借道执行，
@@ -1381,7 +1395,7 @@ fn handle_bugreport_native(serial: Option<&str>, args: &[String]) -> Option<i32>
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1394,11 +1408,14 @@ fn handle_bugreport_native(serial: Option<&str>, args: &[String]) -> Option<i32>
                 match dev.pull(&remote, &local.to_string_lossy()) {
                     Ok(()) => {
                         let _ = dev.shell_command(&format!("rm -f {}", shell_quote(&remote)));
-                        println!("Bug report copied to {}", local.display());
+                        crate::progress::print_success(&format!(
+                            "Bug report copied to {}",
+                            local.display()
+                        ));
                         Some(0)
                     }
                     Err(e) => {
-                        eprintln!("bugreport pull failed: {}", e);
+                        crate::progress::print_error(&format!("bugreport pull failed: {}", e));
                         Some(1)
                     }
                 }
@@ -1418,7 +1435,7 @@ fn handle_bugreport_mux(serial: Option<&str>, args: &[String]) -> Option<i32> {
     }) {
         Some(Ok(out)) => out,
         Some(Err(e)) => {
-            eprintln!("{}", e.trim());
+            crate::progress::print_error(&format!("{}", e.trim()));
             return Some(1);
         }
         None => return Some(mux_no_fallback("bugreport")),
@@ -1427,7 +1444,9 @@ fn handle_bugreport_mux(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let _ = io::stdout().flush();
 
     let Some(remote) = parse_bugreportz_path(&output) else {
-        eprintln!("bugreport: 设备不支持 bugreportz；5037 server 在位时暂不支持旧式流式 bugreport");
+        crate::progress::print_error(&format!(
+            "bugreport: 设备不支持 bugreportz；5037 server 在位时暂不支持旧式流式 bugreport"
+        ));
         return Some(1);
     };
     let local = default_bugreport_local_path(&remote, args.first().map(String::as_str));
@@ -1439,11 +1458,11 @@ fn handle_bugreport_mux(serial: Option<&str>, args: &[String]) -> Option<i32> {
             let _ = crate::adb_mux_client::retry_via_server(|| {
                 crate::adb_mux_client::capture_shell_result(serial, &cleanup)
             });
-            println!("Bug report copied to {}", local.display());
+            crate::progress::print_success(&format!("Bug report copied to {}", local.display()));
             Some(0)
         }
         Some(Err(e)) => {
-            eprintln!("bugreport pull failed: {}", e);
+            crate::progress::print_error(&format!("bugreport pull failed: {}", e));
             Some(1)
         }
         None => Some(mux_no_fallback("bugreport")),
@@ -1452,22 +1471,22 @@ fn handle_bugreport_mux(serial: Option<&str>, args: &[String]) -> Option<i32> {
 
 fn handle_sideload_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let Some(package) = args.first() else {
-        eprintln!("adb sideload requires PACKAGE");
+        crate::progress::print_error(&format!("adb sideload requires PACKAGE"));
         return Some(1);
     };
     if args.len() > 1 {
-        eprintln!("adb sideload accepts exactly one PACKAGE");
+        crate::progress::print_error(&format!("adb sideload accepts exactly one PACKAGE"));
         return Some(1);
     }
     if !Path::new(package).is_file() {
-        eprintln!("sideload package does not exist: {}", package);
+        crate::progress::print_error(&format!("sideload package does not exist: {}", package));
         return Some(1);
     }
 
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1475,7 +1494,7 @@ fn handle_sideload_native(serial: Option<&str>, args: &[String]) -> Option<i32> 
     match dev.sideload(package) {
         Ok(()) => Some(0),
         Err(e) => {
-            eprintln!("sideload failed: {}", e);
+            crate::progress::print_error(&format!("sideload failed: {}", e));
             Some(1)
         }
     }
@@ -1486,7 +1505,10 @@ fn stream_legacy_bugreport(mut dev: AdbDevice, target: Option<&str>) -> Option<i
         Some(path) => match fs::File::create(path) {
             Ok(file) => Some(file),
             Err(e) => {
-                eprintln!("failed to create bugreport file '{}': {}", path, e);
+                crate::progress::print_error(&format!(
+                    "failed to create bugreport file '{}': {}",
+                    path, e
+                ));
                 return Some(1);
             }
         },
@@ -1511,7 +1533,7 @@ fn stream_legacy_bugreport(mut dev: AdbDevice, target: Option<&str>) -> Option<i
     match result {
         Ok(exit) => Some(exit.code),
         Err(e) => {
-            eprintln!("bugreport failed: {}", e);
+            crate::progress::print_error(&format!("bugreport failed: {}", e));
             Some(1)
         }
     }
@@ -1564,21 +1586,26 @@ fn handle_sync_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let product_out = match env::var_os("ANDROID_PRODUCT_OUT").map(PathBuf::from) {
         Some(path) if path.is_dir() => path,
         _ => {
-            eprintln!("adb sync requires ANDROID_PRODUCT_OUT to point to a build output directory");
+            crate::progress::print_error(&format!(
+                "adb sync requires ANDROID_PRODUCT_OUT to point to a build output directory"
+            ));
             return Some(1);
         }
     };
 
     let partitions = resolve_sync_partitions(&product_out, &partitions);
     if partitions.is_empty() {
-        eprintln!("No sync partitions found under {}", product_out.display());
+        crate::progress::print_error(&format!(
+            "No sync partitions found under {}",
+            product_out.display()
+        ));
         return Some(1);
     }
 
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1590,7 +1617,7 @@ fn handle_sync_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
         match push_path_recursive(&mut dev, &local, &remote, dry_run || list_only) {
             Ok(count) => {
                 total += count;
-                println!(
+                crate::progress::print_success(&format!(
                     "{}: {} file{} {}",
                     partition,
                     count,
@@ -1600,15 +1627,15 @@ fn handle_sync_native(serial: Option<&str>, args: &[String]) -> Option<i32> {
                     } else {
                         "synced"
                     }
-                );
+                ));
             }
             Err(e) => {
-                eprintln!("sync {} failed: {}", partition, e);
+                crate::progress::print_error(&format!("sync {} failed: {}", partition, e));
                 return Some(1);
             }
         }
     }
-    println!("Total: {} file{}", total, plural_s(total));
+    crate::progress::print_success(&format!("Total: {} file{}", total, plural_s(total)));
     Some(0)
 }
 
@@ -1732,12 +1759,12 @@ fn should_route_via_mux() -> bool {
 fn print_mux_text_result(result: Option<Result<String, String>>, what: &str) -> Option<i32> {
     match result {
         Some(Ok(output)) => {
-            print!("{}", output);
+            crate::progress::print_info(&output);
             let _ = io::stdout().flush();
             Some(0)
         }
         Some(Err(e)) => {
-            eprintln!("{}", e.trim());
+            crate::progress::print_error(&format!("{}", e.trim()));
             Some(1)
         }
         None => Some(mux_no_fallback(what)),
@@ -1798,10 +1825,10 @@ fn handle_wait_for_native(serial: Option<&str>, command: &str) -> Option<i32> {
         first
     };
     if !matches!(state, "device" | "disconnect") {
-        eprintln!(
+        crate::progress::print_error(&format!(
             "adb {}: only device/disconnect waits are supported by the USB/TCP backend",
             command
-        );
+        ));
         return Some(1);
     }
     let wait_disconnect = state == "disconnect";
@@ -1822,7 +1849,7 @@ fn handle_wait_for_native(serial: Option<&str>, command: &str) -> Option<i32> {
         }
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
-                eprintln!("{} timed out", command);
+                crate::progress::print_error(&format!("{} timed out", command));
                 return Some(1);
             }
         }
@@ -1885,7 +1912,7 @@ fn handle_shell(serial: Option<&str>, args: &[String]) -> Option<i32> {
     let mut dev = match open_adb_device_native(serial) {
         Ok(dev) => dev,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1894,14 +1921,14 @@ fn handle_shell(serial: Option<&str>, args: &[String]) -> Option<i32> {
         match dev {
             AdbDevice::Usb(mut usb) => {
                 if let Err(e) = usb.true_pty_shell() {
-                    eprintln!("Terminal error: {}", e);
+                    crate::progress::print_error(&format!("Terminal error: {}", e));
                     return Some(1);
                 }
                 return Some(0);
             }
             AdbDevice::Tcp(mut tcp) => {
                 if let Err(e) = tcp.interactive_shell() {
-                    eprintln!("Terminal error: {}", e);
+                    crate::progress::print_error(&format!("Terminal error: {}", e));
                     return Some(1);
                 }
                 return Some(0);
@@ -1927,7 +1954,7 @@ fn handle_shell(serial: Option<&str>, args: &[String]) -> Option<i32> {
             Some(exit.code)
         }
         Err(e) => {
-            eprintln!("Command failed: {}", e);
+            crate::progress::print_error(&format!("Command failed: {}", e));
             Some(1)
         }
     }
@@ -1935,13 +1962,13 @@ fn handle_shell(serial: Option<&str>, args: &[String]) -> Option<i32> {
 
 fn handle_connect_native(args: &[String]) -> Option<i32> {
     let Some(target) = args.first() else {
-        eprintln!("adb connect requires HOST[:PORT]");
+        crate::progress::print_error(&format!("adb connect requires HOST[:PORT]"));
         return Some(1);
     };
     let endpoint = match normalize_endpoint(target) {
         Ok(endpoint) => endpoint,
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1952,14 +1979,14 @@ fn handle_connect_native(args: &[String]) -> Option<i32> {
     }) {
         Ok(_) => {
             if let Err(e) = add_tcp_device(&serial) {
-                eprintln!("{}", e);
+                crate::progress::print_error(&format!("{}", e));
                 return Some(1);
             }
-            println!("connected to {}", serial);
+            crate::progress::print_success(&format!("connected to {}", serial));
             Some(0)
         }
         Err(e) => {
-            eprintln!("failed to connect to {}: {}", serial, e);
+            crate::progress::print_error(&format!("failed to connect to {}: {}", serial, e));
             Some(1)
         }
     }
@@ -1970,9 +1997,9 @@ fn handle_disconnect_native(args: &[String]) -> Option<i32> {
         let records = load_tcp_devices();
         let _ = save_tcp_devices(&[]);
         if records.is_empty() {
-            println!("no tcp adb devices connected");
+            crate::progress::print_info("no tcp adb devices connected");
         } else {
-            println!("disconnected everything");
+            crate::progress::print_success("disconnected everything");
         }
         return Some(0);
     }
@@ -1980,7 +2007,7 @@ fn handle_disconnect_native(args: &[String]) -> Option<i32> {
     let endpoint = match normalize_endpoint(&args[0]) {
         Ok(endpoint) => endpoint.serial(),
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             return Some(1);
         }
     };
@@ -1988,32 +2015,30 @@ fn handle_disconnect_native(args: &[String]) -> Option<i32> {
     let before = records.len();
     records.retain(|item| item != &endpoint);
     if records.len() == before {
-        eprintln!("no such device {}", endpoint);
+        crate::progress::print_error(&format!("no such device {}", endpoint));
         return Some(1);
     }
     match save_tcp_devices(&records) {
         Ok(()) => {
-            println!("disconnected {}", endpoint);
+            crate::progress::print_success(&format!("disconnected {}", endpoint));
             Some(0)
         }
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             Some(1)
         }
     }
 }
 
 fn print_service(dev: &mut AdbDevice, service: &str) -> Result<(), String> {
-    let mut stdout = io::stdout();
+    // root/remount/tcpip 等是文本操作应答，先收完整再汉化；shell/exec-out 使用另一条裸流出口。
+    let mut output = Vec::new();
     dev.execute_service_streaming(service, |payload| {
-        stdout
-            .write_all(payload)
-            .map_err(|e| format!("failed to write service output: {}", e))?;
-        stdout
-            .flush()
-            .map_err(|e| format!("failed to flush service output: {}", e))?;
+        output.extend_from_slice(payload);
         Ok(())
-    })
+    })?;
+    crate::progress::print_info(&String::from_utf8_lossy(&output));
+    Ok(())
 }
 
 fn tcp_registry_path() -> PathBuf {

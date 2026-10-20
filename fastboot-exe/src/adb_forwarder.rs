@@ -43,7 +43,7 @@ pub fn run_forwarder_process() -> ! {
     let code = match run_forwarder(&serial, &local, &remote, ready_file) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("adb forwarder failed: {}", e);
+            crate::progress::print_error(&format!("adb forwarder failed: {}", e));
             1
         }
     };
@@ -52,7 +52,7 @@ pub fn run_forwarder_process() -> ! {
 
 pub fn handle_forward_command(serial: Option<&str>, args: &[String]) -> i32 {
     if args.is_empty() {
-        eprintln!("usage: adb forward [--list] [--remove LOCAL] [--remove-all] [--no-rebind] LOCAL REMOTE");
+        crate::progress::print_error(&format!("usage: adb forward [--list] [--remove LOCAL] [--remove-all] [--no-rebind] LOCAL REMOTE"));
         return 1;
     }
 
@@ -67,13 +67,13 @@ pub fn handle_forward_command(serial: Option<&str>, args: &[String]) -> i32 {
         }
         "--remove" => {
             let Some(local) = args.get(1) else {
-                eprintln!("adb forward --remove requires LOCAL");
+                crate::progress::print_error(&format!("adb forward --remove requires LOCAL"));
                 return 1;
             };
             return match remove_forward(local) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     1
                 }
             };
@@ -89,11 +89,11 @@ pub fn handle_forward_command(serial: Option<&str>, args: &[String]) -> i32 {
     }
 
     let Some(local) = args.get(position) else {
-        eprintln!("adb forward requires LOCAL and REMOTE");
+        crate::progress::print_error(&format!("adb forward requires LOCAL and REMOTE"));
         return 1;
     };
     let Some(remote) = args.get(position + 1) else {
-        eprintln!("adb forward requires LOCAL and REMOTE");
+        crate::progress::print_error(&format!("adb forward requires LOCAL and REMOTE"));
         return 1;
     };
 
@@ -109,7 +109,7 @@ pub fn handle_forward_command(serial: Option<&str>, args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("{}", e);
+            crate::progress::print_error(&format!("{}", e));
             1
         }
     }
@@ -159,12 +159,15 @@ fn run_forwarder(
                     let result = open_selected_device(Some(&serial))
                         .and_then(|mut dev| dev.forward_tcp_stream(&remote, stream));
                     if let Err(e) = result {
-                        eprintln!("adb forward connection failed: {}", e);
+                        crate::progress::print_error(&format!(
+                            "adb forward connection failed: {}",
+                            e
+                        ));
                     }
                 });
             }
             Err(e) => {
-                eprintln!("adb forward accept failed: {}", e);
+                crate::progress::print_error(&format!("adb forward accept failed: {}", e));
                 thread::sleep(Duration::from_millis(100));
             }
         }

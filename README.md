@@ -113,6 +113,20 @@ fn read_bootloader(serial: &str) -> Result<String, String> {
 结果以字符串 / `Result<T, String>` 返回；传输快照区分设备、总量、已传量与设备写入阶段。
 宿主必须保留设备选择与取消边界，不能因后台查询超时取消其他设备的长传输。
 
+## 操作响应与中文解释
+
+CLI 的人类可读操作提示及错误先保留原文，随后追加一行 `中文：完整解释`。
+`response_text::format_operation` 用于明确的操作提示，`format_error` 用于失败详情，
+`format_status` 只处理识别出的状态行；重复经过展示出口不会重复追加译文。
+ADB 授权、安装失败、Fastboot 设备拒绝、传输和系统错误共用词表，分区名、路径、数值与错误码保留。
+厂商未收录的自由文本如实标注，不能猜测成败或假称全部已翻译。
+
+设备列表、getvar/getprop 值、认证数据、shell/exec-out 原始字节和 JSON 数据保持解析契约。
+Rust embed 的原始结果交给宿主解析，宿主按页面用途选择展示格式。
+RMFlashTool 的普通 Fastboot TAB 脚本刷写只显示「正在刷写 xxx」「刷写 xxx 成功」，
+只有失败详情显示原文及中文解释；批量 TAB 的 Fastboot/9008 只显示进度和结果状态。
+这些页面规则在宿主工程实现，本仓库提供共用协议与格式器。
+
 ## 连接、认证与配置
 
 - 当前用户的 `~/.android/adbkey` 持久化 RSA 私钥，兼容 PKCS#8 和 PKCS#1；已有可读密钥复用，

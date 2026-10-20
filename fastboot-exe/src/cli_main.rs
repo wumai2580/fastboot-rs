@@ -110,13 +110,27 @@ pub async fn main() {
         std::process::exit(exit_code);
     }
 
-    let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
+    let cli = match Cli::try_parse_from(normalize_cli_args(std::env::args_os())) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.exit()
+        }
+        Err(error) => {
+            print_error(&error.to_string());
+            std::process::exit(2);
+        }
+    };
 
     if let Err(e) = run(cli).await {
         print_error(&e.to_string());
 
         if let Some(hint) = e.recovery_hint() {
-            eprintln!("\n{}", hint);
+            crate::progress::print_error(&format!("\n{}", hint));
         }
 
         std::process::exit(1);
@@ -149,7 +163,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    eprintln!("枚举 fastboot 设备失败: {}", e);
+                    crate::progress::print_error(&format!("枚举 fastboot 设备失败: {}", e));
                     std::process::exit(1);
                 }
             }
@@ -212,7 +226,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
                 let mut dev = match open_adb_device(cli.serial.as_deref()) {
                     Ok(d) => d,
                     Err(e) => {
-                        eprintln!("{}", e);
+                        crate::progress::print_error(&format!("{}", e));
                         std::process::exit(1);
                     }
                 };
@@ -229,7 +243,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
                 ) {
                     Ok(exit) => exit.code,
                     Err(e) => {
-                        eprintln!("执行失败 {}", e);
+                        crate::progress::print_error(&format!("执行失败 {}", e));
                         1
                     }
                 };
@@ -241,12 +255,12 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
                 let mut dev = match open_adb_device(cli.serial.as_deref()) {
                     Ok(d) => d,
                     Err(e) => {
-                        eprintln!("{}", e);
+                        crate::progress::print_error(&format!("{}", e));
                         std::process::exit(1);
                     }
                 };
                 if let Err(e) = dev.true_pty_shell() {
-                    eprintln!("终端异常 {}", e);
+                    crate::progress::print_error(&format!("终端异常 {}", e));
                 }
             }
             std::process::exit(0);
@@ -257,17 +271,17 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             let mut dev = match open_adb_device(cli.serial.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             };
             match dev.push(local_str, remote_str) {
                 Ok(_) => {
-                    println!("{}: 1 file pushed", remote_str);
+                    print_success(&format!("{}: 1 file pushed", remote_str));
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    eprintln!("Push 失败 {}", e);
+                    crate::progress::print_error(&format!("Push 失败 {}", e));
                     std::process::exit(1);
                 }
             }
@@ -276,7 +290,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             let mut dev = match open_adb_device(cli.serial.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             };
@@ -300,11 +314,11 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
 
             match dev.pull(&remote, &final_path) {
                 Ok(_) => {
-                    println!("文件已保存至 {}", final_path);
+                    print_success(&format!("文件已保存至 {}", final_path));
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    eprintln!("拉取失败 {}", e);
+                    crate::progress::print_error(&format!("拉取失败 {}", e));
                     std::process::exit(1);
                 }
             }
@@ -314,14 +328,14 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             let mut dev = match open_adb_device(cli.serial.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             };
             match dev.install(apk_str) {
-                Ok(_) => println!("安装成功"),
+                Ok(_) => print_success("安装成功"),
                 Err(e) => {
-                    eprintln!("安装失败 {}", e);
+                    crate::progress::print_error(&format!("安装失败 {}", e));
                     std::process::exit(1);
                 }
             }
@@ -335,14 +349,14 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             let mut dev = match open_adb_device(cli.serial.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             };
             match dev.install_multiple(&apk_strs, replace) {
-                Ok(_) => println!("安装成功"),
+                Ok(_) => print_success("安装成功"),
                 Err(e) => {
-                    eprintln!("安装失败 {}", e);
+                    crate::progress::print_error(&format!("安装失败 {}", e));
                     std::process::exit(1);
                 }
             }
@@ -361,7 +375,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             let mut dev = match open_adb_device(cli.serial.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             };
@@ -378,7 +392,7 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             }
 
             if let Err(e) = dev.logcat(grep_keyword.as_deref()) {
-                eprintln!("{}", e);
+                crate::progress::print_error(&format!("{}", e));
             }
             std::process::exit(0);
         }
@@ -387,10 +401,10 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             match open_adb_device(cli.serial.as_deref()) {
                 Ok(mut dev) => {
                     if let Err(e) = dev.screencap(output_str) {
-                        eprintln!("截图流拉取失败 {}", e);
+                        crate::progress::print_error(&format!("截图流拉取失败 {}", e));
                     }
                 }
-                Err(e) => eprintln!("{}", e),
+                Err(e) => print_error(&e.to_string()),
             }
             std::process::exit(0);
         }
@@ -411,11 +425,11 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             if let Ok(mut dev) = open_adb_device(cli.serial.as_deref()) {
                 let shell_cmd = format!("input keyevent {}", keycode);
                 match dev.shell_command(&shell_cmd) {
-                    Ok(_) => println!("底层按键宏执行成功"),
-                    Err(e) => eprintln!("执行失败 {}", e),
+                    Ok(_) => print_success("底层按键宏执行成功"),
+                    Err(e) => print_error(&format!("执行失败 {}", e)),
                 }
             } else {
-                eprintln!("未检测到处于 ADB 模式的设备");
+                crate::progress::print_error(&format!("未检测到处于 ADB 模式的设备"));
             }
             std::process::exit(0);
         }
@@ -437,16 +451,16 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
                 if let Ok(mut dev) = open_adb_device(cli.serial.as_deref()) {
                     let shell_cmd = format!("input keyevent {}", keycode);
                     match dev.shell_command(&shell_cmd) {
-                        Ok(_) => println!("{} 执行成功", cmd),
-                        Err(e) => eprintln!("执行失败 {}", e),
+                        Ok(_) => print_success(&format!("{} 执行成功", cmd)),
+                        Err(e) => print_error(&format!("执行失败 {}", e)),
                     }
                 } else {
-                    eprintln!("未检测到处于 ADB 模式的设备");
+                    crate::progress::print_error(&format!("未检测到处于 ADB 模式的设备"));
                 }
                 std::process::exit(0);
             }
             _ => {
-                eprintln!("未知的中文指令 {}", cmd);
+                crate::progress::print_error(&format!("未知的中文指令 {}", cmd));
                 std::process::exit(1);
             }
         },
@@ -460,10 +474,10 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             match open_adb_device(cli.serial.as_deref()) {
                 Ok(mut dev) => {
                     let _ = dev.root();
-                    println!("请等待 3-5 秒 让设备重新连接到电脑");
+                    print_info("请等待 3-5 秒 让设备重新连接到电脑");
                 }
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             }
@@ -473,10 +487,10 @@ async fn run(cli: Cli) -> Result<(), FastbootError> {
             match open_adb_device(cli.serial.as_deref()) {
                 Ok(mut dev) => {
                     let _ = dev.unroot();
-                    println!("请等待 3-5 秒 让设备重新连接到电脑");
+                    print_info("请等待 3-5 秒 让设备重新连接到电脑");
                 }
                 Err(e) => {
-                    eprintln!("{}", e);
+                    crate::progress::print_error(&format!("{}", e));
                     std::process::exit(1);
                 }
             }
@@ -685,10 +699,10 @@ async fn cmd_getvar(
 /// writing 阶段并推进进度，不再卡在发送完成的 100%。用于无 steady-tick 进度条的批量刷写流程。
 fn attach_cli_status_callbacks(driver: &mut driver::FastbootDriver<UsbTransport>) {
     driver.set_prolog_callback(Box::new(|msg: &str| {
-        eprintln!("{}", msg);
+        progress::print_status_stderr(msg);
     }));
     driver.set_info_callback(Box::new(|msg: &str| {
-        eprintln!("(bootloader) {}", msg);
+        progress::print_status_stderr(&format!("(bootloader) {}", msg));
     }));
 }
 
@@ -720,11 +734,15 @@ fn setup_live_progress(
     // 既给人看实时状态，也让 GUI 解析 stderr 推进 writing 进度。
     let pb_prolog = pb_arc.clone();
     driver.set_prolog_callback(Box::new(move |msg: &str| {
+        pb_prolog.println(crate::response_text::format_operation(msg));
         pb_prolog.set_message(msg.to_string());
     }));
     let pb_info = pb_arc.clone();
     driver.set_info_callback(Box::new(move |msg: &str| {
-        pb_info.println(format!("(bootloader) {}", msg));
+        pb_info.println(crate::response_text::format_status(&format!(
+            "(bootloader) {}",
+            msg
+        )));
     }));
 
     pb_arc
@@ -799,11 +817,14 @@ async fn cmd_flash(
     // GUI 解析 stderr 后进入 writing 阶段并据此推进进度，不再卡在发送完成的 100%。
     let pb_prolog = pb_arc.clone();
     driver.set_prolog_callback(Box::new(move |msg: &str| {
-        pb_prolog.println(msg);
+        pb_prolog.println(crate::response_text::format_operation(msg));
     }));
     let pb_info = pb_arc.clone();
     driver.set_info_callback(Box::new(move |msg: &str| {
-        pb_info.println(format!("(bootloader) {}", msg));
+        pb_info.println(crate::response_text::format_status(&format!(
+            "(bootloader) {}",
+            msg
+        )));
     }));
 
     let mut out = Ok(());
@@ -828,7 +849,7 @@ async fn cmd_flash(
         pb_arc.finish_and_clear();
         std::thread::sleep(std::time::Duration::from_millis(50));
         let elapsed = start_time.elapsed().as_secs_f64();
-        println!("OKAY [{:>7.3}s]", elapsed);
+        print_success(&format!("OKAY [{:>7.3}s]", elapsed));
     } else {
         pb_arc.finish_and_clear();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1376,7 +1397,7 @@ async fn cmd_reboot(serial: &Option<String>, target: &str) -> Result<(), Fastboo
             tolerate(driver.reboot_to(target).await)
         };
         result.map_err(|e| reboot_cli_error(target, start, e))?;
-        println!("{}", protocol::reboot_ok_text(target, start));
+        print_success(&protocol::reboot_ok_text(target, start));
         return Ok(());
     }
 
@@ -1393,7 +1414,7 @@ async fn cmd_reboot(serial: &Option<String>, target: &str) -> Result<(), Fastboo
             open_adb_device(target_serial).map_err(|e| reboot_cli_error(target, start, e))?;
         dev.reboot(target)
             .map_err(|e| reboot_cli_error(target, start, FastbootError::Adb(e)))?;
-        println!("{}", protocol::reboot_ok_text(target, start));
+        print_success(&protocol::reboot_ok_text(target, start));
         return Ok(());
     }
 
@@ -1519,13 +1540,13 @@ async fn cmd_flashall(
         let part_name = part_mgr.get_partition_name(&img.part_name);
         let path = Path::new(&img.img_name);
 
-        println!(
+        print_info(&format!(
             "\n[{}/{}] 刷写 {} -> {}",
             i + 1,
             all_images.len(),
             img.img_name,
             part_name
-        );
+        ));
 
         let file_size = fs::metadata(path).map_err(FastbootError::Io)?.len();
         let raw_size = if sparse::is_sparse_file(path).unwrap_or(false) {
@@ -1556,13 +1577,13 @@ async fn cmd_flashall(
 
             pb.finish_and_clear();
         }
-        println!(
+        print_success(&format!(
             "[{}/{}] Writing '{}' ({})                    OKAY",
             i + 1,
             all_images.len(),
             part_name,
             format_size(file_size)
-        );
+        ));
     }
 
     if wipe {
@@ -1577,7 +1598,7 @@ async fn cmd_flashall(
 async fn wipe_user_data(
     driver: &mut driver::FastbootDriver<UsbTransport>,
 ) -> Result<(), FastbootError> {
-    println!("\n擦除 userdata...");
+    print_info("\n擦除 userdata...");
     driver.erase("userdata").await?;
     let _ = driver.erase("metadata").await;
     print_success("userdata / metadata 已擦除");
@@ -1652,13 +1673,13 @@ async fn cmd_update(
             }
             _ => task.partition.clone(),
         };
-        println!(
+        print_info(&format!(
             "\n[{}/{}] 刷写 {} -> {}",
             i + 1,
             tasks.len(),
             task.filename,
             partition
-        );
+        ));
 
         let file_size = tool
             .source()
@@ -1706,13 +1727,13 @@ async fn cmd_update(
 
             pb.finish_and_clear();
         }
-        println!(
+        print_success(&format!(
             "[{}/{}] Writing '{}' ({})                    OKAY",
             i + 1,
             tasks.len(),
             partition,
             format_size(file_size)
-        );
+        ));
     }
 
     if wipe {
@@ -1837,12 +1858,12 @@ async fn cmd_adb_uninstall(serial: &Option<String>, package: &str) -> Result<(),
     // 优先经 daemon 复用连接执行；不可用则回退直连。
     if let Some(res) = adb_daemon::capture_shell(serial.as_deref(), &cmd) {
         let output = res.map_err(FastbootError::Adb)?;
-        print!("{}", output);
+        print_success(&output);
         return Ok(());
     }
     let mut dev = open_adb_device(serial.as_deref())?;
     let output = dev.shell_command(&cmd).map_err(FastbootError::Adb)?;
-    print!("{}", output);
+    print_success(&output);
     Ok(())
 }
 
@@ -1878,11 +1899,14 @@ async fn cmd_adb_screenrecord(
     output: &Path,
     time: u32,
 ) -> Result<(), FastbootError> {
-    println!("Recording for {} seconds... (Ctrl+C to stop early)", time);
+    print_info(&format!(
+        "Recording for {} seconds... (Ctrl+C to stop early)",
+        time
+    ));
     let mut dev = open_adb_device(serial.as_deref())?;
     dev.screenrecord(&output.to_string_lossy(), time)
         .map_err(FastbootError::Adb)?;
-    println!("Recording saved to {}", output.display());
+    print_success(&format!("Recording saved to {}", output.display()));
     Ok(())
 }
 

@@ -25,17 +25,31 @@ pub fn format_size(bytes: u64) -> String {
 pub fn print_success(message: &str) {
     crate::logger::log_line(message);
     if !is_machine_readable() {
-        println!("{}", message);
+        println!("{}", crate::response_text::format_operation(message));
     }
 }
 pub fn print_error(message: &str) {
     crate::logger::log_line(&format!("错误: {}", message));
-    eprintln!("{}", message);
+    if is_machine_readable() {
+        eprintln!("{}", message);
+    } else {
+        eprintln!("{}", crate::response_text::format_error(message));
+    }
 }
 pub fn print_info(message: &str) {
     crate::logger::log_line(message);
     if !is_machine_readable() {
-        println!("{}", message);
+        println!("{}", crate::response_text::format_operation(message));
+    }
+}
+
+/// Fastboot 阶段回调继续走 stderr，避免改变 stdout 查询/JSON 的解析契约。
+pub fn print_status_stderr(message: &str) {
+    crate::logger::log_line(message);
+    if is_machine_readable() {
+        eprintln!("{}", message);
+    } else {
+        eprintln!("{}", crate::response_text::format_status(message));
     }
 }
 
@@ -72,7 +86,7 @@ impl Spinner {
             return;
         }
         self.bar.finish_and_clear();
-        println!("{}", message);
+        print_success(message);
     }
 }
 

@@ -63,7 +63,7 @@ fn android_dir() -> PathBuf {
     dir.push(".android");
     if !dir.exists() {
         if let Err(e) = fs::create_dir_all(&dir) {
-            eprintln!("警告: 无法创建 .android 目录: {}", e);
+            crate::progress::print_error(&format!("警告: 无法创建 .android 目录: {}", e));
         }
     }
     dir
@@ -92,8 +92,12 @@ fn backup_file(path: &Path) {
         .unwrap_or("adbkey");
     let backup = path.with_file_name(format!("{}.corrupt-{}.bak", name, ts));
     match fs::copy(path, &backup) {
-        Ok(_) => eprintln!("提示: 已将原密钥备份为 {}", backup.display()),
-        Err(e) => eprintln!("警告: 备份 {} 失败: {}", path.display(), e),
+        Ok(_) => {
+            crate::progress::print_info(&format!("提示: 已将原密钥备份为 {}", backup.display()))
+        }
+        Err(e) => {
+            crate::progress::print_error(&format!("警告: 备份 {} 失败: {}", path.display(), e))
+        }
     }
 }
 
@@ -118,7 +122,7 @@ fn generate_private_key_in_memory() -> RsaPrivateKey {
         match RsaPrivateKey::new(&mut rng, RSA_KEY_SIZE) {
             Ok(key) => return key,
             Err(e) => {
-                eprintln!("警告: 密钥生成失败: {}, 重试...", e);
+                crate::progress::print_error(&format!("警告: 密钥生成失败: {}, 重试...", e));
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
@@ -160,7 +164,7 @@ fn ensure_pub_consistent(pub_path: &Path, key: &RsaPrivateKey) {
     }
     let expected = generate_adb_public_key(key);
     if let Err(e) = write_atomic(pub_path, expected.as_bytes()) {
-        eprintln!("警告: 修复 adbkey.pub 失败: {}", e);
+        crate::progress::print_error(&format!("警告: 修复 adbkey.pub 失败: {}", e));
     }
 }
 
@@ -169,14 +173,14 @@ fn persist_keypair(priv_path: &Path, pub_path: &Path, key: &RsaPrivateKey) {
     match key.to_pkcs8_pem(LineEnding::LF) {
         Ok(pem) => {
             if let Err(e) = write_atomic(priv_path, pem.as_bytes()) {
-                eprintln!("警告: 写入私钥失败: {}", e);
+                crate::progress::print_error(&format!("警告: 写入私钥失败: {}", e));
             }
         }
-        Err(e) => eprintln!("警告: 私钥格式化失败: {}", e),
+        Err(e) => crate::progress::print_error(&format!("警告: 私钥格式化失败: {}", e)),
     }
     let pub_str = generate_adb_public_key(key);
     if let Err(e) = write_atomic(pub_path, pub_str.as_bytes()) {
-        eprintln!("警告: 写入公钥失败: {}", e);
+        crate::progress::print_error(&format!("警告: 写入公钥失败: {}", e));
     }
 }
 
@@ -194,17 +198,17 @@ pub fn load_or_generate_private_key() -> RsaPrivateKey {
                     ensure_pub_consistent(&pub_path, &key);
                     return key;
                 }
-                eprintln!(
+                crate::progress::print_error(&format!(
                     "警告: 现有 adbkey 无法解析(PKCS#8/#1 均失败)，已备份并重新生成，设备需重新授权一次"
-                );
+                ));
                 backup_file(&priv_path);
                 backup_file(&pub_path);
             }
             Err(e) => {
-                eprintln!(
+                crate::progress::print_error(&format!(
                     "警告: 暂时无法读取 adbkey({})，本次使用临时密钥且不改动磁盘文件",
                     e
-                );
+                ));
                 return generate_private_key_in_memory();
             }
         }

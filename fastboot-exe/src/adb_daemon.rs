@@ -432,11 +432,20 @@ pub fn run_service(serial: Option<&str>, service: &str) -> Option<i32> {
         return None;
     }
     let serial = serial.unwrap_or("");
-    send_and_pump(
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = send_and_pump(
         &[VERB_SERVICE, serial.as_bytes(), service.as_bytes()],
-        stdout_sink,
-        stderr_sink,
-    )
+        |bytes| output.extend_from_slice(bytes),
+        |bytes| error.extend_from_slice(bytes),
+    )?;
+    if !output.is_empty() {
+        crate::progress::print_info(&String::from_utf8_lossy(&output));
+    }
+    if !error.is_empty() {
+        crate::progress::print_error(&String::from_utf8_lossy(&error));
+    }
+    Some(code)
 }
 
 /// 经 daemon 执行 shell 并**捕获**输出（供需要二次加工输出的调用方，如 pm list 去前缀）。
@@ -771,7 +780,11 @@ fn serve_shell(
                 if let Ok(mut g) = held_path.lock() {
                     *g = None;
                 }
-                let _ = write_frame(pipe, KIND_STDERR, e.as_bytes());
+                let _ = write_frame(
+                    pipe,
+                    KIND_STDERR,
+                    crate::response_text::format_error(&e).as_bytes(),
+                );
                 let _ = write_frame(pipe, KIND_EXIT, &1i32.to_le_bytes());
             }
         },
@@ -781,7 +794,10 @@ fn serve_shell(
             let _ = write_frame(
                 pipe,
                 KIND_STDERR,
-                b"more than one ADB device/emulator; use -s <serial>\n",
+                crate::response_text::format_error(
+                    "more than one ADB device/emulator; use -s <serial>\n",
+                )
+                .as_bytes(),
             );
             let _ = write_frame(pipe, KIND_EXIT, &1i32.to_le_bytes());
         }
@@ -807,7 +823,8 @@ fn write_ambiguous(pipe: HANDLE) {
     let _ = write_frame(
         pipe,
         KIND_STDERR,
-        b"more than one ADB device/emulator; use -s <serial>\n",
+        crate::response_text::format_error("more than one ADB device/emulator; use -s <serial>\n")
+            .as_bytes(),
     );
     let _ = write_frame(pipe, KIND_EXIT, &1i32.to_le_bytes());
 }

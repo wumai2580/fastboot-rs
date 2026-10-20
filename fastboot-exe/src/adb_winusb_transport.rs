@@ -1201,7 +1201,7 @@ impl AdbWinUsbDevice {
                             crate::logger::log_line(
                                 "ADB 等待授权：设备未识别本机公钥，已发送公钥，请在手机点击「允许 USB 调试」",
                             );
-                            println!("请点亮手机屏幕并点击「允许 USB 调试」");
+                            crate::progress::print_info("请点亮手机屏幕并点击「允许 USB 调试」");
                         }
                         if auth_wait.is_none() {
                             *auth_wait = Some(AuthWait::begin(serial_from_path(&self.device_path)));
@@ -2335,16 +2335,17 @@ impl AdbWinUsbDevice {
         self.write_message(0x4e45504f, local_id, 0, b"root:\0")
             .map_err(|e| format!("发送 root OPEN 失败: {:?}", e))?;
 
+        let mut output = Vec::new();
         while let Ok(hdr) = self.read_header() {
             let payload = self.read_payload(hdr.data_length).unwrap_or_default();
             if hdr.command == 0x45545257 {
-                let msg = String::from_utf8_lossy(&payload);
-                print!("{}", msg.trim());
+                output.extend_from_slice(&payload);
                 let _ = self.write_message(0x59414b4f, local_id, hdr.arg0, &[]);
             } else if hdr.command == 0x45534c43 {
                 break;
             }
         }
+        crate::progress::print_info(&String::from_utf8_lossy(&output));
         Ok(())
     }
 
@@ -2355,16 +2356,17 @@ impl AdbWinUsbDevice {
         self.write_message(0x4e45504f, local_id, 0, b"unroot:\0")
             .map_err(|e| format!("发送 unroot OPEN 失败: {:?}", e))?;
 
+        let mut output = Vec::new();
         while let Ok(hdr) = self.read_header() {
             let payload = self.read_payload(hdr.data_length).unwrap_or_default();
             if hdr.command == 0x45545257 {
-                let msg = String::from_utf8_lossy(&payload);
-                println!("{}", msg.trim());
+                output.extend_from_slice(&payload);
                 let _ = self.write_message(0x59414b4f, local_id, hdr.arg0, &[]);
             } else if hdr.command == 0x45534c43 {
                 break;
             }
         }
+        crate::progress::print_info(&String::from_utf8_lossy(&output));
         Ok(())
     }
 
